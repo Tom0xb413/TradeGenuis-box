@@ -15,7 +15,7 @@ TradeGenuis · 箱体突破 本地看板服务器
   GET  /api/kline?code=     个股日K（含箱体/试盘；成功结果约 45 分钟内存+磁盘缓存）
   POST /api/scan            触发扫描 {mode, force}；1 小时内默认返回缓存
   GET  /api/status          扫描状态/日志
-  GET/POST /api/config      配置（自动扫描 / Telegram）
+  GET/POST /api/config      配置（自动扫描 / Telegram / box_mode）
 
 自动扫描调度：config.auto 开启时，每个交易日 11:30 与 15:00 自动执行全市场扫描（绕过 1h 缓存）。
 """
@@ -43,6 +43,7 @@ DEFAULT_CONFIG = {
     "auto_times": ["11:30", "15:00"],   # 交易日午间收盘 / 收盘
     "tg_token": "",
     "tg_chat": "",
+    "box_mode": "classic",              # classic | p0 | p1（p1 为骨架，看板禁用）
 }
 
 STATE = {
@@ -77,6 +78,11 @@ def parse_query(path: str) -> tuple[str, dict]:
                 k, v = kv.split("=", 1)
                 q[k] = v
     return p, q
+
+
+def configured_box_mode() -> str:
+    with LOCK:
+        return sc.normalize_box_mode(STATE["config"].get("box_mode"))
 
 
 def attach_cache_meta(payload: dict | None, *, from_cache: bool) -> dict:
@@ -132,6 +138,9 @@ def scan_cache_response(mode: str, force: bool = False) -> dict | None:
     data = load_scan_cache(mode)
     if not data or not sc.is_fresh_scan_cache(data):
         return None
+    data_box = sc.normalize_box_mode(data.get("box_mode") or "classic")
+    if data_box != configured_box_mode():
+        return None
     out = attach_cache_meta(data, from_cache=True)
     out["status"] = "cached"
     out["msg"] = "1小时内使用缓存结果，未重新全量扫描"
@@ -158,8 +167,11 @@ def load_config() -> None:
 
 
 def save_config(cfg: dict) -> None:
+    incoming = dict(cfg)
+    if "box_mode" in incoming:
+        incoming["box_mode"] = sc.normalize_box_mode(incoming.get("box_mode"))
     with LOCK:
-        STATE["config"].update(cfg)
+        STATE["config"].update(incoming)
         data = dict(STATE["config"])
     CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -343,41 +355,50 @@ def _kline_disk_put(market: str, code: str, payload: dict) -> None:
         pass
 
 
+def _with_box(payload: dict) -> dict:
+    """按当前配置箱体模式现算 box，使 K 线叠加与卡片模式一致；不改缓存里的 bars。"""
+    if not _valid_kline_payload(payload):
+        return payload
+    mode = configured_box_mode()
+    out = dict(payload)
+    out["box"] = sc.compute_box(out.get("bars") or [], mode=mode)
+    out["box_mode"] = mode
+    return out
+
+
 def get_kline(code: str, lmt: int = 160, market: str = "stock") -> dict | None:
     """个股/币日K + 箱体。成功结果缓存 ~45 分钟；错误与空序列不写入。"""
     hit = _kline_mem_get(market, code)
     if hit:
-        return hit
+        return _with_box(hit)
     hit = _kline_disk_get(market, code)
     if hit:
         _kline_mem_put(market, code, hit)
-        return hit
+        return _with_box(hit)
     try:
         if market == "crypto":
             bars = sc.fetch_crypto_kline(code)
             if not bars:
                 return {"code": code, "error": "empty kline"}
-            box = sc.compute_box(bars)
             payload = {
                 "code": code, "name": code, "price": bars[-1]["close"],
                 "chg": None, "turnover": None, "volume_ratio": None,
-                "bar_date": bars[-1]["date"], "bars": bars, "box": box,
+                "bar_date": bars[-1]["date"], "bars": bars,
             }
         else:
             quote = sc.fetch_quote(code)
             bars = sc.fetch_kline(code, lmt=lmt)
             if not bars:
                 return {"code": code, "error": "empty kline"}
-            box = sc.compute_box(bars)
             payload = {
                 "code": code, "name": quote.get("name", ""),
                 "price": quote["price"], "chg": quote["chg"],
                 "turnover": quote["turnover"], "volume_ratio": quote["volume_ratio"],
-                "bar_date": bars[-1]["date"], "bars": bars, "box": box,
+                "bar_date": bars[-1]["date"], "bars": bars,
             }
         _kline_mem_put(market, code, payload)
         _kline_disk_put(market, code, payload)
-        return payload
+        return _with_box(payload)
     except Exception as e:
         return {"code": code, "error": str(e)[:150]}
 
@@ -460,7 +481,10 @@ class Handler(BaseHTTPRequestHandler):
                 })
         elif p == "/api/config":
             with LOCK:
-                self._json(dict(STATE["config"]))
+                cfg = dict(STATE["config"])
+            cfg["box_mode"] = sc.normalize_box_mode(cfg.get("box_mode"))
+            cfg["box_modes"] = list(sc.BOX_MODES)
+            self._json(cfg)
         elif p == "/api/quotes":
             codes = [c for c in q.get("codes", "").split(",") if c.isdigit()][:100]
             self._json(get_quotes(codes))
@@ -512,7 +536,10 @@ class Handler(BaseHTTPRequestHandler):
             body = self._body()
             save_config(body)
             log("配置已保存")
-            self._json({"ok": True, "config": dict(STATE["config"])})
+            with LOCK:
+                cfg = dict(STATE["config"])
+            cfg["box_modes"] = list(sc.BOX_MODES)
+            self._json({"ok": True, "config": cfg})
         elif p == "/api/pool":
             body = self._body()
             action = body.get("action", "")
