@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""多模式箱体：classic 回归、P0 门控/分位数/试盘、P1 骨架、配置与 K 线接线。不跑全市场扫描。"""
+"""多模式箱体：classic 回归、P0 门控、P1 斜向通道、配置与 K 线接线。不跑全市场扫描。"""
 from __future__ import annotations
 
 import json
+import math
 import sys
 import tempfile
 import threading
@@ -42,6 +43,18 @@ def _trend(n: int = 80, *, start=10.0, step=0.30) -> list[dict]:
     for i in range(n):
         px = start + i * step
         out.append(_bar(i, o=px, h=px + 0.12, l=px - 0.12, c=px, vol=1000.0))
+    return out
+
+
+def _channel(n: int = 80, *, start=10.0, step=0.015, amp=0.22, half=0.12,
+             period=12.0, vol=1000.0) -> list[dict]:
+    """带震荡的斜向通道，参数使 P1 的 slope_norm / R² / ADX 落在定稿带内。"""
+    out = []
+    for i in range(n):
+        mid = start + i * step
+        osc = amp * math.sin(2 * math.pi * i / period)
+        c = mid + osc
+        out.append(_bar(i, o=c - osc * 0.2, h=c + half, l=c - half, c=c, vol=vol))
     return out
 
 
@@ -128,20 +141,114 @@ class TestCountRulesTest(unittest.TestCase):
         self.assertEqual(p0["tests"], 0)
 
 
-class P1StubTest(unittest.TestCase):
-    def test_p1_is_enum_and_falls_back(self):
-        self.assertIn("p1", sc.BOX_MODES)
-        bars = _flat()
-        out = sc.compute_box(bars, mode="p1")
-        self.assertEqual(out["box_mode"], "p1")
-        self.assertEqual(out["p1_status"], "not_implemented")
-        self.assertEqual(out["box_high"], 10.20)
-        self.assertEqual(out["box_quality"], "p1_pending")
-        self.assertIn("尚未实现", out["note"])
+class P1ChannelTest(unittest.TestCase):
+    def test_constants(self):
+        self.assertEqual(be.P1_LOOK, 50)
+        self.assertEqual(be.P1_MIN_BARS, 30)
+        self.assertEqual(be.P1_HIGH_Q, 0.95)
+        self.assertEqual(be.P1_LOW_Q, 0.05)
+        self.assertAlmostEqual(be.P1_SLOPE_NORM_MIN, 0.0005)
+        self.assertAlmostEqual(be.P1_SLOPE_NORM_MAX, 0.004)
+        self.assertAlmostEqual(be.P1_R2_MIN, 0.35)
+        self.assertAlmostEqual(be.P1_R2_MAX, 0.80)
+        self.assertEqual(be.P1_MIN_MID_CROSSES, 3)
+        self.assertEqual(be.P1_ADX_PERIOD, 14)
+        self.assertAlmostEqual(be.P1_ADX_MAX, 40.0)
+        self.assertAlmostEqual(be.P1_WIDTH_MAX, 0.25)
+
+    def test_ascending_channel(self):
+        bars = _channel()
+        box = sc.compute_box(bars, mode="p1")
+        self.assertIsNotNone(box)
+        self.assertEqual(box["box_mode"], "p1")
+        self.assertNotEqual(box.get("p1_status"), "not_implemented")
+        self.assertEqual(box["box_kind"], "ascending")
+        self.assertGreater(box["slope"], 0)
+        self.assertGreaterEqual(box["slope_norm"], be.P1_SLOPE_NORM_MIN)
+        self.assertLessEqual(box["slope_norm"], be.P1_SLOPE_NORM_MAX)
+        self.assertGreaterEqual(box["r2"], be.P1_R2_MIN)
+        self.assertLessEqual(box["r2"], be.P1_R2_MAX)
+        self.assertFalse(be.is_box_quality_reject(box["box_quality"]))
+        pts = box["channel_points"]
+        self.assertGreaterEqual(len(pts), be.P1_MIN_BARS)
+        last = pts[-1]
+        self.assertGreater(last["up"], last["mid"])
+        self.assertLess(last["down"], last["mid"])
+        self.assertAlmostEqual(box["box_high"], last["up"], delta=0.02)
+        self.assertAlmostEqual(box["box_low"], last["down"], delta=0.02)
+        self.assertGreaterEqual(box["mid_crosses"], be.P1_MIN_MID_CROSSES)
+
+    def test_descending_channel(self):
+        bars = _channel(start=12.0, step=-0.015)
+        box = sc.compute_box(bars, mode="p1")
+        self.assertEqual(box["box_kind"], "descending")
+        self.assertLess(box["slope"], 0)
+        self.assertLessEqual(box["slope_norm"], -be.P1_SLOPE_NORM_MIN)
+        self.assertGreaterEqual(box["r2"], be.P1_R2_MIN)
+        self.assertLessEqual(box["r2"], be.P1_R2_MAX)
+        last = box["channel_points"][-1]
+        self.assertGreater(last["up"], last["mid"])
+        self.assertLess(last["down"], last["mid"])
+
+    def test_spike_quantile_more_robust_than_max_resid(self):
+        clean = _channel()
+        spiked = [dict(b) for b in clean]
+        sliced = be.select_box_window(clean, look=be.P1_LOOK)
+        self.assertIsNotNone(sliced)
+        start, box_end, win = sliced
+        spike_i = start + len(win) // 2
+        mid_est = (clean[spike_i]["high"] + clean[spike_i]["low"]) / 2.0
+        spiked[spike_i]["high"] = mid_est + 8.0
+        a = sc.compute_box(clean, mode="p1")
+        b = sc.compute_box(spiked, mode="p1")
+        self.assertFalse(be.is_box_quality_reject(a["box_quality"]))
+        self.assertAlmostEqual(b["b_up"], a["b_up"], delta=0.12)
+        self.assertLess(b["box_high"] - a["box_high"], 0.5)
+        # 若用 raw max(High-mid)，毛刺会把上轨抬到约 +8
+        self.assertLess(b["b_up"], 2.0)
+
+    def test_steep_trend_rejected(self):
+        box = sc.compute_box(_trend(), mode="p1")
+        self.assertEqual(box["tests"], 0)
+        self.assertIn(box["box_quality"], ("slope_reject", "r2_reject", "adx_reject", "vshape_reject"))
+        self.assertTrue(be.is_box_quality_reject(box["box_quality"]))
+
+    def test_wide_channel_amplitude_reject(self):
+        bars = _channel(half=3.0)
+        box = sc.compute_box(bars, mode="p1")
+        self.assertEqual(box["box_quality"], "amplitude_reject")
+        self.assertEqual(box["tests"], 0)
+        self.assertGreaterEqual(box["width_pct"], be.P1_WIDTH_MAX * 100)
+
+    def test_p1_test_candle_vs_dynamic_r(self):
+        bars = _channel()
+        probe = sc.compute_box(bars, mode="p1")
+        self.assertFalse(be.is_box_quality_reject(probe["box_quality"]))
+        # 窗口中段：刺穿当时上轨、收盘回到内侧、长上影、放量
+        sliced = be.select_box_window(bars, look=be.P1_LOOK)
+        start, _end, win = sliced
+        j = len(win) // 2
+        idx = start + j
+        r = probe["channel_points"][j]["up"]
+        bars[idx] = _bar(idx, o=r - 0.06, h=r + 0.02, l=r - 0.18, c=r - 0.08, vol=2500.0)
+        box = sc.compute_box(bars, mode="p1")
+        self.assertGreaterEqual(box["tests"], 1)
+        self.assertIn(bars[idx]["date"], box["test_dates"])
 
     def test_compute_box_p1_callable(self):
         self.assertTrue(callable(sc.compute_box_p1))
-        self.assertTrue(callable(sc.compute_box_p0))
+        self.assertIn("p1", sc.BOX_MODES)
+
+    def test_p1_tests_do_not_change_score_weights(self):
+        base = {
+            "theme_ok": True, "volume_days": 3, "volume_ratio": 2.0,
+            "fund_state": "流入", "control": "高", "tests": 3,
+        }
+        a = sc.score_row(dict(base))
+        b = sc.score_row({**base, "box_kind": "ascending", "slope_norm": 0.001,
+                          "r2": 0.6, "adx": 22, "box_mode": "p1"})
+        self.assertEqual(a["score"], b["score"])
+        self.assertEqual(a["score"], 100)
 
 
 class ConfigAndKlineWireTest(unittest.TestCase):
@@ -188,11 +295,12 @@ class ConfigAndKlineWireTest(unittest.TestCase):
         self.assertEqual(a["box_mode"], "classic")
         self.assertEqual(a["box"]["box_high"], 10.20)
         self.assertEqual(self.calls["kline"], 1)
-        server.STATE["config"]["box_mode"] = "p0"
-        b = server.get_kline("600000")
+        server.STATE["config"]["box_mode"] = "p1"
+        c = server.get_kline("600000")
         self.assertEqual(self.calls["kline"], 1)
-        self.assertEqual(b["box_mode"], "p0")
-        self.assertEqual(b["box"]["box_mode"], "p0")
+        self.assertEqual(c["box_mode"], "p1")
+        self.assertEqual(c["box"]["box_mode"], "p1")
+        self.assertIn("channel_points", c["box"])
 
     def test_scan_cache_miss_when_box_mode_differs(self):
         now = datetime.now(BJT)
@@ -272,13 +380,18 @@ class DashboardBoxModeContractTest(unittest.TestCase):
         self.assertIn("箱体模式", self.html)
         self.assertIn("data-box-mode=\"classic\"", self.html)
         self.assertIn("P0增强", self.html)
-        self.assertIn("P1通道(soon)", self.html)
+        self.assertIn("P1通道", self.html)
         self.assertIn("setBoxMode", self.html)
-        self.assertIn("即将推出", self.html)
+        self.assertNotIn("P1通道(soon)", self.html)
+        self.assertNotIn("即将推出", self.html)
 
-    def test_p1_disabled(self):
+    def test_p1_enabled(self):
         self.assertIn('data-box-mode="p1"', self.html)
-        self.assertRegex(self.html, r'data-box-mode="p1"[^>]*disabled')
+        self.assertNotRegex(self.html, r'data-box-mode="p1"[^>]*disabled')
+        self.assertIn("channel_points", self.html)
+        self.assertIn("boxQualityRejected", self.html)
+        self.assertIn("非箱体·振幅过大", self.html)
+        self.assertIn("strokeChannel", self.html)
 
     def test_edge_event_badge_present(self):
         self.assertIn("edgeBadgeHTML", self.html)
@@ -305,6 +418,7 @@ class BoxRowFieldsTest(unittest.TestCase):
         self.assertEqual(f["tests"], 0)
         self.assertEqual(f["box_mode"], "p0")
         self.assertIsNone(f["box_high"])
+        self.assertIsNone(f["box_kind"])
         self.assertEqual(f["edge_event"], "none")
         self.assertEqual(f["breakout_candidates"], 0)
 
@@ -314,6 +428,14 @@ class BoxRowFieldsTest(unittest.TestCase):
         self.assertEqual(f["box_span_pct"], box["span_pct"])
         self.assertEqual(f["box_quality"], box.get("box_quality"))
         self.assertIn("edge_event", f)
+
+    def test_p1_row_maps_kind(self):
+        box = sc.compute_box(_channel(), mode="p1")
+        f = sc.box_row_fields(box, "p1")
+        self.assertEqual(f["box_kind"], "ascending")
+        self.assertEqual(f["box_mode"], "p1")
+        self.assertIsNotNone(f["slope_norm"])
+        self.assertNotIn("channel_points", f)
 
 
 def _breakout_bar(i: int, *, close=10.40, high=10.42, low=10.14, open_=10.15, vol=2000.0) -> dict:
@@ -376,6 +498,16 @@ class EdgeEventClassificationTest(unittest.TestCase):
         kinds = {e["index"]: e["kind"] for e in box["edge_events"]}
         self.assertEqual(kinds.get(76), "breakout_failed")
         self.assertEqual(box["breakout_failed"], 1)
+
+    def test_per_bar_r_uses_that_bars_edge(self):
+        bars = _flat()
+        r_series = [9.50] * len(bars)
+        r_series[50] = 10.20
+        # 第 50 根：刺 10.20 上沿的试盘；若误用常数 9.50 则 Close=10.02 会像突破
+        bars[50] = _bar(50, o=10.05, h=10.20, l=10.00, c=10.02, vol=2000.0)
+        ev = be.classify_edge_events(bars, r_series, start_idx=0)
+        kinds = {e["index"]: e["kind"] for e in ev["edge_events"]}
+        self.assertEqual(kinds.get(50), "test")
 
     def test_classic_tests_unchanged_when_events_attached(self):
         bars = _flat()

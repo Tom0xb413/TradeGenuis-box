@@ -139,9 +139,11 @@ class DashboardLazyLoadContractTest(unittest.TestCase):
         self.assertIn("if (klineOk(d)) S.kbars[job.key] = d", self.html)
 
     def test_drawchart_box_overlay_kept(self):
-        self.assertIn("if (box.box_high != null)", self.html)
+        self.assertIn("box.box_high != null", self.html)
         self.assertIn("setLineDash", self.html)
         self.assertIn("function drawChart", self.html)
+        self.assertIn("channel_points", self.html)
+        self.assertIn("非箱体·振幅过大", self.html)
 
     def test_crypto_still_lists_pool(self):
         self.assertIn("币圈：展示进池子全部标的", self.html)

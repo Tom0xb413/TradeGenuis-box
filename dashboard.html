@@ -192,7 +192,7 @@
       <div class="tabs" id="boxModeTabs">
         <button class="tab on" data-box-mode="classic" type="button">经典</button>
         <button class="tab" data-box-mode="p0" type="button">P0增强</button>
-        <button class="tab" data-box-mode="p1" type="button" disabled title="即将推出：斜向通道 + ADX">P1通道(soon)</button>
+        <button class="tab" data-box-mode="p1" type="button" title="斜向通道：OLS 中轴 + 残差分位数 + ADX">P1通道</button>
       </div>
     </div>
     <span class="grow"></span>
@@ -289,6 +289,64 @@ function cacheHintText(data) {
 }
 function boxModeLabel(mode) {
   return { classic: "经典", p0: "P0增强", p1: "P1通道" }[mode] || "经典";
+}
+function boxKindLabel(kind) {
+  return { ascending: "上升", descending: "下降", flat_fallback: "近水平" }[kind] || "";
+}
+function boxQualityRejected(q) {
+  return q === "amplitude_reject" || q === "slope_reject" || q === "r2_reject"
+    || q === "vshape_reject" || q === "adx_reject";
+}
+function boxRejectNote(q) {
+  if (q === "amplitude_reject") return "非箱体·振幅过大";
+  if (q === "slope_reject") return "非通道·斜率过陡";
+  if (q === "r2_reject") return "非通道·拟合不佳";
+  if (q === "vshape_reject") return "非通道·V形";
+  if (q === "adx_reject") return "非通道·趋势过强";
+  return "";
+}
+function boxLineText(src) {
+  if (!src) return "";
+  const mode = boxModeLabel(src.box_mode || "classic");
+  const reject = boxRejectNote(src.box_quality);
+  if (reject) return reject + " · " + mode;
+  if (src.box_low == null || src.box_high == null) return mode;
+  let s = `箱体 ${fmt2(src.box_low)}–${fmt2(src.box_high)} · ${mode}`;
+  const kind = boxKindLabel(src.box_kind);
+  if (kind) s += " · " + kind;
+  if (src.box_quality === "weak") s += " · 偏弱";
+  return s;
+}
+function channelSeries(box, bars) {
+  const pts = (box && box.channel_points) || [];
+  if (!pts.length) return null;
+  const byDate = {};
+  pts.forEach(p => { if (p && p.date) byDate[p.date] = p; });
+  const mid = [], up = [], down = [];
+  let hit = 0;
+  bars.forEach(b => {
+    const p = byDate[b.date];
+    if (p) hit++;
+    mid.push(p && p.mid != null ? Number(p.mid) : null);
+    up.push(p && p.up != null ? Number(p.up) : null);
+    down.push(p && p.down != null ? Number(p.down) : null);
+  });
+  return hit ? { mid, up, down } : null;
+}
+function strokeChannel(ctx, xs, ys, y, col, dash) {
+  ctx.save();
+  ctx.strokeStyle = col;
+  if (dash) ctx.setLineDash(dash);
+  ctx.beginPath();
+  let started = false;
+  for (let i = 0; i < xs.length; i++) {
+    if (ys[i] == null || Number.isNaN(ys[i])) { started = false; continue; }
+    const yy = y(ys[i]);
+    if (!started) { ctx.moveTo(xs[i], yy); started = true; }
+    else ctx.lineTo(xs[i], yy);
+  }
+  ctx.stroke();
+  ctx.restore();
 }
 function edgeEventLabel(kind) {
   return {
@@ -439,7 +497,7 @@ function cardHTML(r, i) {
       ${items.map(([t, v, ok]) => ok
         ? `<span><b>${t}</b> ${v}</span>`
         : `<span class="no">${t} ${v}</span>`).join("")}
-      <span class="box">箱体 ${fmt2(r.box_low)}–${fmt2(r.box_high)} · ${boxModeLabel(r.box_mode || "classic")}</span>
+      <span class="box">${boxLineText(r)}</span>
       ${boHint}
     </div>
   </article>`;
@@ -516,8 +574,8 @@ async function loadChart(code, market) {
   if (cv) drawChart(cv, d);
   const card = document.querySelector(`.sig[data-code="${escSel(code)}"][data-market="${escSel(market)}"]`);
   const boxEl = card && card.querySelector(".box");
-  if (boxEl && d.box && d.box.box_high != null) {
-    boxEl.textContent = `箱体 ${fmt2(d.box.box_low)}–${fmt2(d.box.box_high)} · ${boxModeLabel(d.box_mode || d.box.box_mode || "classic")}`;
+  if (boxEl && d.box) {
+    boxEl.textContent = boxLineText({ ...d.box, box_mode: d.box_mode || d.box.box_mode || "classic" });
   }
   const host = card && card.querySelector("[data-edge-host]");
   if (host && d.box) host.innerHTML = edgeBadgeHTML(d.box.edge_event);
@@ -553,12 +611,19 @@ function drawChart(cv, d) {
   const bars = d.bars || [];
   if (!bars.length) return;
   cv.classList.add("drawn");
+  const box = d.box || {};
+  const rejected = boxQualityRejected(box.box_quality);
+  const ch = (!rejected && channelSeries(box, bars)) || null;
   let lo = Infinity, hi = -Infinity, vmax = 0;
   bars.forEach(b => { lo = Math.min(lo, b.low); hi = Math.max(hi, b.high); vmax = Math.max(vmax, b.vol); });
+  if (ch) {
+    ch.up.forEach(v => { if (v != null) { hi = Math.max(hi, v); lo = Math.min(lo, v); } });
+    ch.down.forEach(v => { if (v != null) { hi = Math.max(hi, v); lo = Math.min(lo, v); } });
+    ch.mid.forEach(v => { if (v != null) { hi = Math.max(hi, v); lo = Math.min(lo, v); } });
+  }
   const span = (hi - lo) || 1e-9;
   const n = bars.length, step = (W - padL - padR) / n, bw = Math.max(1, Math.min(8, step * 0.62));
   const y = v => padT + (hi - v) / span * vh;
-  const box = d.box || {};
   ctx.clearRect(0, 0, W, H);
   ctx.font = "10px IBM Plex Mono, monospace";
   ctx.lineWidth = 1;
@@ -568,13 +633,35 @@ function drawChart(cv, d) {
     ctx.strokeStyle = "rgba(229,212,182,.07)"; ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(W - padR, yy); ctx.stroke();
     ctx.fillStyle = "rgba(229,212,182,.4)"; ctx.textAlign = "left"; ctx.fillText(priceFmt(v), W - padR + 6, yy + 3);
   }
-  if (box.box_high != null) {
+  if (!rejected && ch) {
+    const xs = bars.map((_, i) => padL + i * step + step / 2);
+    strokeChannel(ctx, xs, ch.up, y, "#8FC98B", [5, 4]);
+    strokeChannel(ctx, xs, ch.mid, y, "rgba(229,212,182,.45)", [3, 3]);
+    strokeChannel(ctx, xs, ch.down, y, "rgba(229,212,182,.35)", [5, 4]);
+    const lastUp = [...ch.up].reverse().find(v => v != null);
+    const lastDn = [...ch.down].reverse().find(v => v != null);
+    if (lastUp != null) {
+      ctx.fillStyle = "#8FC98B";
+      ctx.fillText(priceFmt(Number(lastUp)), padL + 2, Math.max(padT + 10, y(lastUp) - 4));
+    }
+    if (lastDn != null) {
+      ctx.fillStyle = "rgba(229,212,182,.55)";
+      ctx.fillText(priceFmt(Number(lastDn)), padL + 2, Math.min(padT + vh - 2, y(lastDn) + 12));
+    }
+  } else if (!rejected && box.box_high != null) {
     [[box.box_high, "#8FC98B"], [box.box_low, "rgba(229,212,182,.35)"]].forEach(([v, col]) => {
       const yy = Math.max(padT, Math.min(padT + vh, y(v)));
       ctx.save(); ctx.setLineDash([5, 4]); ctx.strokeStyle = col; ctx.beginPath();
       ctx.moveTo(padL, yy); ctx.lineTo(W - padR, yy); ctx.stroke(); ctx.restore();
       ctx.fillStyle = col; ctx.fillText(priceFmt(Number(v)), padL + 2, yy - 4);
     });
+  } else if (rejected) {
+    const note = boxRejectNote(box.box_quality);
+    if (note) {
+      ctx.fillStyle = "rgba(240,122,99,.9)";
+      ctx.textAlign = "left";
+      ctx.fillText(note, padL + 4, padT + 12);
+    }
   }
   bars.forEach((b, i) => {
     const x = padL + i * step + step / 2, up = b.close >= b.open;
@@ -687,14 +774,11 @@ async function saveCfg() {
 const BOX_MODE_TOAST = {
   classic: "箱体模式：经典（窗口最高/最低）。K 线立即按此绘制；评分需强制重扫后更新",
   p0: "箱体模式：P0 增强（分位数 + 振幅门控）。K 线立即按此绘制；评分需强制重扫后更新",
+  p1: "箱体模式：P1 通道（OLS 斜向通道）。K 线立即按此绘制；评分需强制重扫后更新",
 };
 
 async function setBoxMode(mode) {
-  if (mode === "p1") {
-    toast("P1 通道模式即将推出");
-    return;
-  }
-  if (mode !== "classic" && mode !== "p0") return;
+  if (mode !== "classic" && mode !== "p0" && mode !== "p1") return;
   const prev = (S.cfg && S.cfg.box_mode) || "classic";
   if (prev === mode) return;
   try {
