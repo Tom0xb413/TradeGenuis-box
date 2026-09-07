@@ -48,3 +48,29 @@
 ```
 
 看板选项禁用，避免误选后当成真实通道。
+
+## 上沿事件：试盘 vs 真突破
+
+相对**当前模式**算出的上沿 `R`（classic=窗口最高，p0=High 0.95 分位）给刺穿 K 分类。与各模式自己的 `tests` 计分**并行**，四条件 100 分制本 PR **不改**。
+
+触发前提：`High >= R`（触及或刺穿）。
+
+| `kind` | 含义 | 定稿规则 |
+|---|---|---|
+| `test` | 试盘 / 假突破 | `Close ≤ R×1.005`，上影/(H−L)≥**0.4**，上影≥**2×**实体，量≥**1.8×**MA20 |
+| `breakout_candidate` | 潜在突破 | `Close ≥ R×1.015`（α=**1.5%**），实体/振幅≥**0.60**，上影/振幅≤**0.15**，量≥**1.8×**MA20 |
+| `breakout_confirmed` | 确认真突破 | 先满足 candidate，且随后 **2** 根收盘仍 **> R**。**事后标签**，需要 t+2 已收盘；最新一根不会标 confirmed |
+| `breakout_failed` | 失败突破 | candidate 但下一根收盘 **< R**（或 t+2 未能站上） |
+| `none` | 未归类 | 未刺穿，或收盘落在 `R×1.005` 与 `R×1.015` 之间，或形态/量能不够 |
+
+字段（箱体 / 扫描行 / `/api/kline` 的 `box`）：
+
+- `edge_event`：最后一根 K 的分类
+- `last_edge_event` / `last_edge_event_date`：窗口起最近一次非 none 事件
+- `edge_events`：最近最多 12 条 `{date, kind, index}`
+- `breakout_candidates`：candidate+confirmed+failed 根数
+- `breakout_confirmed` / `breakout_failed`：计数
+- `tests`：仍是该模式自己的试盘计数（评分用）
+
+看板：最新一根为试盘/突破时卡片小徽章；K 线悬浮提示该根若在 `edge_events` 里会写出中文标签。
+

@@ -280,6 +280,12 @@ class DashboardBoxModeContractTest(unittest.TestCase):
         self.assertIn('data-box-mode="p1"', self.html)
         self.assertRegex(self.html, r'data-box-mode="p1"[^>]*disabled')
 
+    def test_edge_event_badge_present(self):
+        self.assertIn("edgeBadgeHTML", self.html)
+        self.assertIn("data-edge-host", self.html)
+        self.assertIn("潜在突破", self.html)
+        self.assertIn("breakout_candidate", self.html)
+
 
 class LoadBoxModeFileTest(unittest.TestCase):
     def test_reads_config_json(self):
@@ -299,12 +305,120 @@ class BoxRowFieldsTest(unittest.TestCase):
         self.assertEqual(f["tests"], 0)
         self.assertEqual(f["box_mode"], "p0")
         self.assertIsNone(f["box_high"])
+        self.assertEqual(f["edge_event"], "none")
+        self.assertEqual(f["breakout_candidates"], 0)
 
     def test_maps_span_and_quality(self):
         box = sc.compute_box(_flat(), mode="p0")
         f = sc.box_row_fields(box, "p0")
         self.assertEqual(f["box_span_pct"], box["span_pct"])
         self.assertEqual(f["box_quality"], box.get("box_quality"))
+        self.assertIn("edge_event", f)
+
+
+def _breakout_bar(i: int, *, close=10.40, high=10.42, low=10.14, open_=10.15, vol=2000.0) -> dict:
+    return _bar(i, o=open_, h=high, l=low, c=close, vol=vol)
+
+
+class EdgeEventClassificationTest(unittest.TestCase):
+    def test_constants(self):
+        self.assertEqual(be.EVT_BO_ALPHA, 0.015)
+        self.assertEqual(be.EVT_TEST_SHADOW_BODY, 2.0)
+        self.assertEqual(be.EVT_TEST_VOL_MULT, 1.8)
+        self.assertEqual(be.EVT_BO_CONFIRM_BARS, 2)
+
+    def test_flat_latest_is_none(self):
+        box = sc.compute_box(_flat(), mode="p0")
+        self.assertEqual(box["edge_event"], "none")
+        self.assertEqual(box["breakout_candidates"], 0)
+
+    def test_p0_test_candle_is_edge_test(self):
+        bars = _flat()
+        bars[60] = _bar(60, o=10.05, h=10.20, l=10.00, c=10.02, vol=2000.0)
+        box = sc.compute_box(bars, mode="p0")
+        kinds = {e["date"]: e["kind"] for e in box["edge_events"]}
+        self.assertEqual(kinds[bars[60]["date"]], "test")
+        self.assertEqual(box["tests"], 1)
+        self.assertEqual(box["last_edge_event"], "test")
+        self.assertEqual(box["edge_event"], "none")
+
+    def test_latest_bar_test(self):
+        bars = _flat()
+        bars[-1] = _bar(79, o=10.05, h=10.20, l=10.00, c=10.02, vol=2000.0)
+        box = sc.compute_box(bars, mode="p0")
+        self.assertEqual(box["edge_event"], "test")
+
+    def test_breakout_candidate_on_last_bar(self):
+        bars = _flat()
+        bars[-1] = _breakout_bar(79)
+        box = sc.compute_box(bars, mode="p0")
+        self.assertEqual(box["edge_event"], "breakout_candidate")
+        self.assertGreaterEqual(box["breakout_candidates"], 1)
+        self.assertEqual(box["breakout_confirmed"], 0)
+
+    def test_breakout_confirmed_needs_t2(self):
+        bars = _flat()
+        bars[76] = _breakout_bar(76)
+        bars[77] = _bar(77, o=10.25, h=10.32, l=10.22, c=10.30, vol=1200.0)
+        bars[78] = _bar(78, o=10.28, h=10.35, l=10.24, c=10.31, vol=1100.0)
+        box = sc.compute_box(bars, mode="p0")
+        kinds = {e["index"]: e["kind"] for e in box["edge_events"]}
+        self.assertEqual(kinds.get(76), "breakout_confirmed")
+        self.assertEqual(box["breakout_confirmed"], 1)
+        self.assertEqual(box["edge_event"], "none")
+        self.assertEqual(box["last_edge_event"], "breakout_confirmed")
+
+    def test_breakout_failed_next_close_below_r(self):
+        bars = _flat()
+        bars[76] = _breakout_bar(76)
+        bars[77] = _bar(77, o=10.20, h=10.22, l=10.05, c=10.10, vol=900.0)
+        box = sc.compute_box(bars, mode="p0")
+        kinds = {e["index"]: e["kind"] for e in box["edge_events"]}
+        self.assertEqual(kinds.get(76), "breakout_failed")
+        self.assertEqual(box["breakout_failed"], 1)
+
+    def test_classic_tests_unchanged_when_events_attached(self):
+        bars = _flat()
+        for i in (35, 45, 55):
+            bars[i] = _bar(i, o=10.15, h=10.20, l=9.80, c=10.18, vol=800.0)
+        classic = sc.compute_box(bars, mode="classic")
+        self.assertGreaterEqual(classic["tests"], 3)
+        self.assertIn("edge_event", classic)
+
+    def test_score_ignores_breakout_metadata(self):
+        base = {
+            "theme_ok": True, "volume_days": 3, "volume_ratio": 2.0,
+            "fund_state": "流入", "control": "高", "tests": 3,
+        }
+        a = sc.score_row(dict(base))
+        b = sc.score_row({**base, "edge_event": "breakout_confirmed",
+                          "breakout_candidates": 2, "breakout_confirmed": 1})
+        self.assertEqual(a["score"], b["score"])
+        self.assertEqual(a["score"], 100)
+
+    def test_kline_payload_has_edge_event(self):
+        tmp = tempfile.TemporaryDirectory()
+        disk = Path(tmp.name)
+        server.STATE["kline_cache"] = {}
+        server.STATE["config"] = dict(server.DEFAULT_CONFIG)
+        patches = [
+            patch.object(server, "KLINE_DISK_DIR", disk),
+            patch.object(sc, "fetch_quote", return_value={
+                "price": 10.0, "chg": 0.0, "name": "测", "turnover": 1.0, "volume_ratio": 1.0,
+            }),
+            patch.object(sc, "fetch_kline", return_value=_flat()),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            out = server.get_kline("600000")
+            self.assertIn("edge_event", out["box"])
+            self.assertIn(out["box"]["edge_event"], be.EDGE_EVENTS)
+        finally:
+            for p in patches:
+                p.stop()
+            server.STATE["kline_cache"] = {}
+            tmp.cleanup()
 
 
 if __name__ == "__main__":

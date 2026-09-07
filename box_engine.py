@@ -9,6 +9,7 @@
   p1      — 斜向通道骨架（OLS + 残差分位数 + ADX），本版本未实现
 
 纯函数，不读配置文件。扫描/看板把所选 mode 传进来即可。
+上沿事件（试盘 / 潜在突破 / 确认 / 失败）相对该模式的 R 另行标注，不改四条件评分。
 """
 from __future__ import annotations
 
@@ -34,6 +35,24 @@ P0_SHADOW_RANGE = 0.40      # 上影线 / (H-L) ≥ 0.4
 P0_TEST_VOL_MULT = 1.8      # 量能 ≥ 1.8 × 前 20 根均量
 P0_TEST_VOL_MA = 20
 P0_POST_HOLD_BARS = 3       # 软校验：随后 1–3 根收盘站上中轴（仅元数据，不否决试盘）
+
+# 上沿事件分类（相对当前模式的 R=box_high；与评分 tests 独立）
+EDGE_EVENTS = (
+    "none",
+    "test",
+    "breakout_candidate",
+    "breakout_confirmed",
+    "breakout_failed",
+)
+EVT_TEST_CLOSE = 1.005          # 试盘：收盘回到 R 内侧
+EVT_TEST_SHADOW_RANGE = 0.40    # 上影 / (H-L) ≥ 0.4（对齐 P0）
+EVT_TEST_SHADOW_BODY = 2.0      # 上影 ≥ 2× 实体（对齐 P0，取 1.5–2 的上沿）
+EVT_TEST_VOL_MULT = 1.8         # 试盘量能 ≥ 1.8× MA20（对齐 P0）
+EVT_BO_ALPHA = 0.015            # 潜在突破：Close ≥ R × (1+1.5%)
+EVT_BO_BODY_RANGE = 0.60        # 实体 / 振幅 ≥ 0.60
+EVT_BO_SHADOW_RANGE_MAX = 0.15  # 上影 / 振幅 ≤ 0.15（光脚阳线）
+EVT_BO_VOL_MULT = 1.8           # 突破量能 ≥ 1.8× MA20
+EVT_BO_CONFIRM_BARS = 2         # 确认：随后 2 根收盘仍 > R（事后标签，需 t+2 已收盘）
 
 P1_STATUS = "not_implemented"
 P1_NOTE = "P1 斜向通道尚未实现（计划：OLS 中轴 + 残差分位数通道 + ADX 过滤），当前回退经典箱体"
@@ -141,7 +160,117 @@ def compute_box_classic(bars: list[dict]) -> dict | None:
                 tests += 1
                 test_dates.append(b["date"])
 
-    return _pack(low, high, tests, test_dates, win, box_end, bars[-1]["close"], "classic")
+    packed = _pack(low, high, tests, test_dates, win, box_end, bars[-1]["close"], "classic")
+    return _with_edge_events(packed, bars, high, _start)
+
+
+def empty_edge_fields() -> dict:
+    """无箱体 / 无上沿时的事件字段，保证扫描行 key 齐全。"""
+    return {
+        "edge_event": "none",
+        "edge_event_date": None,
+        "last_edge_event": "none",
+        "last_edge_event_date": None,
+        "edge_events": [],
+        "breakout_candidates": 0,
+        "breakout_confirmed": 0,
+        "breakout_failed": 0,
+    }
+
+
+def _bar_geom(b: dict) -> tuple[float, float, float, float, float] | None:
+    h, l, c, o = float(b["high"]), float(b["low"]), float(b["close"]), float(b["open"])
+    rng = h - l
+    if rng <= 0:
+        return None
+    body = abs(c - o)
+    up_shadow = h - max(o, c)
+    return h, c, rng, body, up_shadow
+
+
+def _shape_vs_r(b: dict, r: float, v_ma: float) -> str | None:
+    """
+    单根形态（不含时间过滤）。High 触及或刺穿 R 才参与。
+    突破与试盘互斥：Close ≥ R×1.015 走突破，Close ≤ R×1.005 走试盘；中间地带不标。
+    """
+    geom = _bar_geom(b)
+    if geom is None or r <= 0:
+        return None
+    h, c, rng, body, up_shadow = geom
+    if h < r:
+        return None
+    v = float(b.get("vol") or 0)
+    if (c >= r * (1.0 + EVT_BO_ALPHA)
+            and (body / rng) >= EVT_BO_BODY_RANGE
+            and (up_shadow / rng) <= EVT_BO_SHADOW_RANGE_MAX
+            and v_ma > 0 and v >= EVT_BO_VOL_MULT * v_ma):
+        return "breakout_candidate"
+    if (c <= r * EVT_TEST_CLOSE
+            and (up_shadow / rng) >= EVT_TEST_SHADOW_RANGE
+            and up_shadow >= EVT_TEST_SHADOW_BODY * body
+            and v_ma > 0 and v >= EVT_TEST_VOL_MULT * v_ma):
+        return "test"
+    return None
+
+
+def _resolve_breakout(bars: list[dict], idx: int, r: float) -> str:
+    """
+    潜在突破的事后时间过滤。确认需要 t+2 两根都已收盘且收盘价仍 > R，
+    因此最新一根最多标 breakout_candidate，不能在当日标 confirmed。
+    """
+    n = len(bars)
+    if idx + 1 >= n:
+        return "breakout_candidate"
+    if bars[idx + 1]["close"] < r:
+        return "breakout_failed"
+    if idx + 2 >= n:
+        return "breakout_candidate"
+    if bars[idx + 2]["close"] > r:
+        return "breakout_confirmed"
+    return "breakout_failed"
+
+
+def classify_edge_events(bars: list[dict], r: float, start_idx: int = 0) -> dict:
+    """
+    相对上沿 R 扫描 start_idx 之后的 K 线（含箱体截断后的突破日）。
+    tests 计分仍由各模式自己统计；这里只附加 edge_* / breakout_* 元数据。
+    """
+    out = empty_edge_fields()
+    if not bars or r is None or r <= 0:
+        return out
+    start_idx = max(0, min(int(start_idx), len(bars)))
+    events = []
+    for idx in range(start_idx, len(bars)):
+        raw = _shape_vs_r(bars[idx], r, _vol_ma(bars, idx))
+        if raw is None:
+            continue
+        kind = _resolve_breakout(bars, idx, r) if raw == "breakout_candidate" else raw
+        events.append({
+            "date": bars[idx]["date"],
+            "kind": kind,
+            "index": idx,
+        })
+    n_cand = sum(1 for e in events if e["kind"] in (
+        "breakout_candidate", "breakout_confirmed", "breakout_failed"))
+    out["breakout_candidates"] = n_cand
+    out["breakout_confirmed"] = sum(1 for e in events if e["kind"] == "breakout_confirmed")
+    out["breakout_failed"] = sum(1 for e in events if e["kind"] == "breakout_failed")
+    out["edge_events"] = events[-12:]
+    if events:
+        out["last_edge_event"] = events[-1]["kind"]
+        out["last_edge_event_date"] = events[-1]["date"]
+    last_idx = len(bars) - 1
+    for e in reversed(events):
+        if e["index"] == last_idx:
+            out["edge_event"] = e["kind"]
+            out["edge_event_date"] = e["date"]
+            break
+    return out
+
+
+def _with_edge_events(packed: dict, bars: list[dict], r: float, start: int) -> dict:
+    packed.update(classify_edge_events(bars, r, start_idx=start))
+    return packed
 
 
 def _vol_ma(bars: list[dict], idx: int, period: int = P0_TEST_VOL_MA) -> float:
@@ -189,12 +318,13 @@ def compute_box_p0(bars: list[dict]) -> dict | None:
     }
 
     if mean_close <= 0 or amp >= P0_AMP_MAX:
-        return _pack(low, high, 0, [], win, box_end, price, "p0", {
+        packed = _pack(low, high, 0, [], win, box_end, price, "p0", {
             **extra_base,
             "box_quality": "amplitude_reject",
             "post_hold_tests": 0,
             "post_hold_dates": [],
         })
+        return _with_edge_events(packed, bars, high, start)
 
     tests = 0
     test_dates = []
@@ -234,12 +364,13 @@ def compute_box_p0(bars: list[dict]) -> dict | None:
     else:
         quality = "none"
 
-    return _pack(low, high, tests, test_dates, win, box_end, price, "p0", {
+    packed = _pack(low, high, tests, test_dates, win, box_end, price, "p0", {
         **extra_base,
         "box_quality": quality,
         "post_hold_tests": len(hold_dates),
         "post_hold_dates": hold_dates[-8:],
     })
+    return _with_edge_events(packed, bars, high, start)
 
 
 def compute_box_p1(bars: list[dict]) -> dict | None:
@@ -266,6 +397,7 @@ def compute_box_p1(bars: list[dict]) -> dict | None:
             "window": None,
             "box_end": None,
             "box_mode": "p1",
+            **empty_edge_fields(),
             **extra,
         }
     packed = dict(out)
@@ -285,8 +417,9 @@ def compute_box(bars: list[dict], mode: str = DEFAULT_BOX_MODE) -> dict | None:
 
 
 def box_row_fields(box: dict | None, mode: str = DEFAULT_BOX_MODE) -> dict:
-    """扫描行上的箱体字段，供 A 股 / 币圈评分共用。"""
+    """扫描行上的箱体字段，供 A 股 / 币圈评分共用。不含评分逻辑。"""
     mode = normalize_box_mode(mode)
+    edge = empty_edge_fields()
     if not box:
         return {
             "box_mode": mode,
@@ -298,6 +431,7 @@ def box_row_fields(box: dict | None, mode: str = DEFAULT_BOX_MODE) -> dict:
             "tests": 0,
             "test_dates": [],
             "box_quality": None,
+            **edge,
         }
     return {
         "box_mode": box.get("box_mode") or mode,
@@ -309,4 +443,11 @@ def box_row_fields(box: dict | None, mode: str = DEFAULT_BOX_MODE) -> dict:
         "tests": int(box.get("tests") or 0),
         "test_dates": list(box.get("test_dates") or []),
         "box_quality": box.get("box_quality"),
+        "edge_event": box.get("edge_event") or "none",
+        "edge_event_date": box.get("edge_event_date"),
+        "last_edge_event": box.get("last_edge_event") or "none",
+        "last_edge_event_date": box.get("last_edge_event_date"),
+        "breakout_candidates": int(box.get("breakout_candidates") or 0),
+        "breakout_confirmed": int(box.get("breakout_confirmed") or 0),
+        "breakout_failed": int(box.get("breakout_failed") or 0),
     }

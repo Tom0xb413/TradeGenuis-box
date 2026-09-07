@@ -126,6 +126,11 @@
     .sig { background: var(--card); border: 1px solid var(--card-border); border-radius: var(--r); padding: 12px 14px 10px; animation: rise .45s cubic-bezier(.2,.7,.3,1) both; }
     .sig.q { border-color: rgba(155,213,151,.5); box-shadow: 0 0 0 1px rgba(155,213,151,.2); }
     .q-badge { display: inline-block; margin-left: 7px; padding: 0 7px; border-radius: 999px; font-family: var(--num); font-size: 11px; font-weight: 600; color: var(--mint-ink); background: var(--up); vertical-align: 1px; }
+    .edge-badge { display: inline-block; margin-left: 6px; padding: 0 7px; border-radius: 999px; font-size: 10.5px; font-weight: 600; vertical-align: 1px; }
+    .edge-badge.edge-test { color: var(--ink); background: rgba(229,212,182,.16); }
+    .edge-badge.edge-cand { color: #E8C48A; background: rgba(232,196,138,.16); }
+    .edge-badge.edge-bo { color: #1C223A; background: var(--up); }
+    .edge-badge.edge-fail { color: var(--down); background: rgba(240,122,99,.16); }
     @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
     .sig-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
     .sig .nm { font-size: 14px; font-weight: 700; white-space: nowrap; }
@@ -285,6 +290,22 @@ function cacheHintText(data) {
 function boxModeLabel(mode) {
   return { classic: "经典", p0: "P0增强", p1: "P1通道" }[mode] || "经典";
 }
+function edgeEventLabel(kind) {
+  return {
+    test: "试盘",
+    breakout_candidate: "潜在突破",
+    breakout_confirmed: "真突破",
+    breakout_failed: "失败突破",
+  }[kind] || "";
+}
+function edgeBadgeHTML(kind) {
+  const lab = edgeEventLabel(kind);
+  if (!lab) return "";
+  const cls = kind === "test" ? "edge-test"
+    : kind === "breakout_confirmed" ? "edge-bo"
+    : kind === "breakout_failed" ? "edge-fail" : "edge-cand";
+  return `<span class="edge-badge ${cls}">${lab}</span>`;
+}
 
 function renderAll() {
   const isCrypto = S.market === "crypto";
@@ -403,9 +424,12 @@ function cardHTML(r, i) {
   const chgText = signOf(r.chg, S.market) + "%";
   // 币圈达标标的加高亮描边 + 「达标」标记
   const qBadge = (isCrypto && r.qualified) ? '<span class="q-badge">达标</span>' : "";
+  const evBadge = edgeBadgeHTML(r.edge_event);
+  const boHint = (r.breakout_candidates > 0)
+    ? `<span class="box">突破候选 ${r.breakout_candidates}</span>` : "";
   return `<article class="sig${(isCrypto && r.qualified) ? ' q' : ''}" data-code="${r.code}" data-market="${S.market}" data-qualified="${r.qualified ? 1 : 0}" style="animation-delay:${Math.min(i * 50, 400)}ms">
     <div class="sig-top">
-      <div><div class="nm">${r.name}${qBadge}</div><div class="cd">${r.code}</div></div>
+      <div><div class="nm">${r.name}${qBadge}<span data-edge-host>${evBadge}</span></div><div class="cd">${r.code}</div></div>
       <div class="sig-top-right"><span class="px" data-px>${price}</span>
         <span class="chg ${clsOf(r.chg)}" data-chg>${chgText}</span>
         <span class="score-badge">${r.score}</span></div>
@@ -416,6 +440,7 @@ function cardHTML(r, i) {
         ? `<span><b>${t}</b> ${v}</span>`
         : `<span class="no">${t} ${v}</span>`).join("")}
       <span class="box">箱体 ${fmt2(r.box_low)}–${fmt2(r.box_high)} · ${boxModeLabel(r.box_mode || "classic")}</span>
+      ${boHint}
     </div>
   </article>`;
 }
@@ -494,6 +519,8 @@ async function loadChart(code, market) {
   if (boxEl && d.box && d.box.box_high != null) {
     boxEl.textContent = `箱体 ${fmt2(d.box.box_low)}–${fmt2(d.box.box_high)} · ${boxModeLabel(d.box_mode || d.box.box_mode || "classic")}`;
   }
+  const host = card && card.querySelector("[data-edge-host]");
+  if (host && d.box) host.innerHTML = edgeBadgeHTML(d.box.edge_event);
 }
 function observeCardCharts() {
   disconnectCharts();
@@ -569,6 +596,8 @@ function drawChart(cv, d) {
     ctx.fillStyle = "rgba(229,212,182,.4)"; ctx.fillText(bars[i].date.slice(5), padL + i * step + step / 2, H - 4);
   });
 
+  const evMap = {};
+  (box.edge_events || []).forEach(e => { if (e && e.date) evMap[e.date] = e.kind; });
   const tip = document.querySelector(`.tip[data-code="${code}"]`);
   if (!tip) return;
   cv.onmousemove = ev => {
@@ -579,8 +608,10 @@ function drawChart(cv, d) {
     tip.style.display = "block";
     tip.style.left = Math.min(W - 190, ev.clientX - rect.left + 14) + "px";
     tip.style.top = (ev.clientY - rect.top - 10) + "px";
+    const evLab = edgeEventLabel(evMap[b.date]);
     tip.innerHTML = `<b>${b.date}</b><br>开 ${priceFmt(b.open)} · 高 ${priceFmt(b.high)}<br>` +
-      `低 ${priceFmt(b.low)} · 收 <b>${priceFmt(b.close)}</b> · 量 ${(b.vol / 10000).toFixed(1)}万`;
+      `低 ${priceFmt(b.low)} · 收 <b>${priceFmt(b.close)}</b> · 量 ${(b.vol / 10000).toFixed(1)}万` +
+      (evLab ? `<br>${evLab}` : "");
   };
   cv.onmouseleave = () => { tip.style.display = "none"; };
 }
