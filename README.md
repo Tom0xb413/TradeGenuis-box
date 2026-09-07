@@ -16,7 +16,7 @@
 - **箱体识别多模式**（横幅「箱体模式」，写入 `data/config.json` 的 `box_mode`）：
   - **经典**（默认）：60 日窗口最高/最低 + 原试盘规则，行为与历史版本一致
   - **P0增强**：分位数边界（High 95% / Low 5%）+ 振幅门控 15% + 更严上影/量能试盘
-  - **P1通道(soon)**：斜向通道骨架，看板禁用；算法留给后续 PR
+  - **P1通道**：斜向通道（OLS 中轴 + 残差 95%/5% 分位带 + 温和斜率/R²/ADX）；K 线画斜轨
   - 切换后 K 线箱体立即按新模式绘制；评分需「强制重扫」。参数与字段见 [docs/box-modes.md](docs/box-modes.md)
   - **试盘 vs 真突破**（元数据，不改四条件满分）：相对当前模式上沿 R 标注 `edge_event`（`test` / `breakout_candidate` / `breakout_confirmed` / `breakout_failed`）。确认突破为 t+2 事后标签
 - **结果优先的图形化看板**：只展示达标标的，每张卡片内嵌 K 线（含成交量、箱体虚线、悬浮十字提示）、四条件状态、评分徽章
@@ -87,10 +87,10 @@ python3 scanner.py --push        # 扫描并推送
 |---|---|
 | `start.sh` | 一键启动脚本（装依赖 + 首次扫描 + 起服务） |
 | `scanner.py` | 扫描引擎：拉数据 → 四条件打分 → 写 JSON / 推 Telegram |
-| `box_engine.py` | 箱体识别：`classic` / `p0` / `p1` 骨架 |
+| `box_engine.py` | 箱体识别：`classic` / `p0` / `p1` 斜向通道 |
 | `server.py` | 本地看板服务器（纯标准库，默认端口 8808） |
 | `dashboard.html` | 看板页（TradeGenuis 深色主题，自托管字体） |
-| `docs/box-modes.md` | 箱体模式参数与 P1 计划 |
+| `docs/box-modes.md` | 箱体模式参数（含 P1 定稿） |
 | `data/pool.json` | 自选池（`code` 必填） |
 | `data/sectors.json` | 用户自定义关注板块 |
 | `data/*.json` | 扫描结果与缓存（自动生成，已在 .gitignore） |

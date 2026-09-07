@@ -43,7 +43,7 @@ DEFAULT_CONFIG = {
     "auto_times": ["11:30", "15:00"],   # 交易日午间收盘 / 收盘
     "tg_token": "",
     "tg_chat": "",
-    "box_mode": "classic",              # classic | p0 | p1（p1 为骨架，看板禁用）
+    "box_mode": "classic",              # classic | p0 | p1（斜向通道）
 }
 
 STATE = {
