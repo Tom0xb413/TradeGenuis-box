@@ -10,6 +10,7 @@ data/universe.json
 data/mkt_cache.json
 data/config.json
 data/sectors.json
+data/kline_cache/
 
 # 本地环境
 .venv/
