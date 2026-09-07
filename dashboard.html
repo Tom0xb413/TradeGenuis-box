@@ -97,8 +97,15 @@
     .tab { border: none; background: transparent; color: var(--ink-dim); font-size: 12px; font-weight: 500; padding: 5px 14px; border-radius: 999px; cursor: pointer; transition: color .2s, background .2s; }
     .tab.on { background: rgba(229,212,182,.16); color: var(--ink); }
     .tab:disabled { opacity: .42; cursor: not-allowed; }
-    .box-mode { display: inline-flex; align-items: center; gap: 6px; }
+    .box-mode {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--chip); border: 1px solid var(--card-border);
+      border-radius: 999px; padding: 3px 4px 3px 12px;
+    }
     .box-mode .k { font-size: 11px; color: var(--ink-faint); white-space: nowrap; }
+    .box-mode .tabs { background: transparent; padding: 0; }
+    .box-mode .tab { padding: 5px 11px; }
+    .box-mode .tab.on { background: rgba(155,213,151,.2); color: var(--up); }
     .act { border: none; border-radius: 999px; font-size: 13px; font-weight: 600; letter-spacing: .08em; padding: 8px 20px; cursor: pointer; transition: filter .2s, transform .1s; color: var(--ink); }
     .act:active { transform: translateY(1px); }
     .act:disabled { opacity: .5; cursor: not-allowed; }
