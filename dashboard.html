@@ -126,6 +126,10 @@
     .score-badge { display: inline-flex; min-width: 38px; height: 26px; padding: 0 8px; align-items: center; justify-content: center; border-radius: 999px; font-family: var(--num); font-weight: 700; font-size: 14px; color: var(--up); background: rgba(155,213,151,.12); margin-left: 4px; }
     .sig-chart { position: relative; margin-top: 8px; }
     .sig-chart canvas { width: 100%; height: 264px; display: block; }
+    .sig-chart canvas:not(.drawn) {
+      background: linear-gradient(90deg, rgba(229,212,182,.045) 25%, rgba(229,212,182,.09) 38%, rgba(229,212,182,.045) 63%);
+      background-size: 400% 100%; animation: shimmer 1.5s ease infinite;
+    }
     .tip { position: absolute; pointer-events: none; background: var(--pop); border: 1px solid var(--card-border); border-radius: 8px; padding: 6px 9px; font-family: var(--mono); font-size: 11.5px; display: none; z-index: 5; line-height: 1.6; color: var(--ink); }
     .sig-line { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--ink-dim); }
     .sig-line b { color: var(--up); font-weight: 600; }
@@ -317,6 +321,7 @@ function renderCfg() {
 function renderCards(rows) {
   const box = $("cards");
   if (!S.loaded) {
+    disconnectCharts();
     box.innerHTML = Array(3).fill('<div class="skel-card"></div>').join("");
     return;
   }
@@ -336,13 +341,15 @@ function renderCards(rows) {
   } else {
     shown = rows.filter(r => r.qualified);
   }
+  disconnectCharts();
   if (!shown.length) {
     box.innerHTML = `<div class="empty"><div class="big">NO SIGNAL</div><p>${S.selBoard ? `该板块暂无股票` : "暂无数据"}</p>
       <button class="act go" type="button" onclick="doScan(false)">${isCrypto ? "币圈扫描" : "全市场扫描"}</button></div>`;
     return;
   }
+  // 币圈仍列出全部进池标的；K 线只在卡片进入视口附近才拉取（见 observeCardCharts）
   box.innerHTML = shown.map((r, i) => cardHTML(r, i)).join("");
-  shown.forEach(r => loadChart(r.code));
+  observeCardCharts();
 }
 
 function cardHTML(r, i) {
@@ -364,7 +371,7 @@ function cardHTML(r, i) {
   const chgText = signOf(r.chg, S.market) + "%";
   // 币圈达标标的加高亮描边 + 「达标」标记
   const qBadge = (isCrypto && r.qualified) ? '<span class="q-badge">达标</span>' : "";
-  return `<article class="sig${(isCrypto && r.qualified) ? ' q' : ''}" data-code="${r.code}" data-market="${S.market}" style="animation-delay:${Math.min(i * 50, 400)}ms">
+  return `<article class="sig${(isCrypto && r.qualified) ? ' q' : ''}" data-code="${r.code}" data-market="${S.market}" data-qualified="${r.qualified ? 1 : 0}" style="animation-delay:${Math.min(i * 50, 400)}ms">
     <div class="sig-top">
       <div><div class="nm">${r.name}${qBadge}</div><div class="cd">${r.code}</div></div>
       <div class="sig-top-right"><span class="px" data-px>${price}</span>
@@ -381,19 +388,94 @@ function cardHTML(r, i) {
   </article>`;
 }
 
-async function ensureK(code) {
-  const key = S.market + ":" + code;
-  if (S.kbars[key]) return S.kbars[key];
-  const d = await jfetch("api/kline?code=" + code + "&lmt=100&market=" + S.market).catch(() => null);
-  S.kbars[key] = d;
-  return d;
-}
+/* K 线：视口懒加载 + 有限并发，避免进页时对 N 张卡片同时打满上游 */
+const KLINE_MAX_INFLIGHT = 4;
+const KLINE_ROOT_MARGIN = "280px 0px";
+let chartObserver = null;
+let klineInflight = 0;
+const klineQueue = [];
+const klineWaiters = new Map();
 
-async function loadChart(code) {
-  const d = await ensureK(code);
-  if (!d || d.error || !(d.bars || []).length) return;
-  const cv = document.querySelector(`.sig[data-code="${code}"] .sig-chart canvas`);
+function escSel(s) {
+  if (window.CSS && CSS.escape) return CSS.escape(String(s));
+  return String(s).replace(/["\\]/g, "\\$&");
+}
+function cardCanvas(code, market) {
+  return document.querySelector(`.sig[data-code="${escSel(code)}"][data-market="${escSel(market)}"] .sig-chart canvas`);
+}
+function disconnectCharts() {
+  if (chartObserver) { chartObserver.disconnect(); chartObserver = null; }
+}
+function resetKlineQueue() {
+  klineQueue.length = 0;
+  klineWaiters.clear();
+}
+function chartPriority(code, market) {
+  const el = document.querySelector(`.sig[data-code="${escSel(code)}"][data-market="${escSel(market)}"]`);
+  if (el && (el.classList.contains("q") || el.dataset.qualified === "1")) return 0;
+  return 1;
+}
+function klineOk(d) {
+  return d && !d.error && (d.bars || []).length;
+}
+function ensureK(code, market) {
+  market = market || S.market;
+  const key = market + ":" + code;
+  const hit = S.kbars[key];
+  if (klineOk(hit)) return Promise.resolve(hit);
+  return new Promise(resolve => {
+    if (!klineWaiters.has(key)) {
+      klineWaiters.set(key, []);
+      klineQueue.push({ key, code, market, priority: chartPriority(code, market) });
+      klineQueue.sort((a, b) => a.priority - b.priority);
+    }
+    klineWaiters.get(key).push(resolve);
+    pumpKlineQueue();
+  });
+}
+function pumpKlineQueue() {
+  while (klineInflight < KLINE_MAX_INFLIGHT && klineQueue.length) {
+    const job = klineQueue.shift();
+    klineInflight++;
+    (async () => {
+      let d = null;
+      try {
+        d = await jfetch("api/kline?code=" + encodeURIComponent(job.code) + "&lmt=100&market=" + encodeURIComponent(job.market));
+      } catch (e) { d = null; }
+      if (klineOk(d)) S.kbars[job.key] = d;
+      const waiters = klineWaiters.get(job.key) || [];
+      klineWaiters.delete(job.key);
+      waiters.forEach(fn => fn(d));
+      klineInflight--;
+      pumpKlineQueue();
+    })();
+  }
+}
+async function loadChart(code, market) {
+  market = market || S.market;
+  const d = await ensureK(code, market);
+  if (!klineOk(d)) return;
+  const cv = cardCanvas(code, market);
   if (cv) drawChart(cv, d);
+}
+function observeCardCharts() {
+  disconnectCharts();
+  const canvases = [...document.querySelectorAll("#cards .sig-chart canvas")];
+  if (!canvases.length) return;
+  if (!("IntersectionObserver" in window)) {
+    canvases.sort((a, b) => chartPriority(a.dataset.code, a.dataset.market) - chartPriority(b.dataset.code, b.dataset.market));
+    canvases.forEach(cv => loadChart(cv.dataset.code, cv.dataset.market));
+    return;
+  }
+  chartObserver = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (!entry.isIntersecting) return;
+      const cv = entry.target;
+      chartObserver.unobserve(cv);
+      loadChart(cv.dataset.code, cv.dataset.market);
+    });
+  }, { root: null, rootMargin: KLINE_ROOT_MARGIN, threshold: 0.01 });
+  canvases.forEach(cv => chartObserver.observe(cv));
 }
 
 function drawChart(cv, d) {
@@ -406,6 +488,7 @@ function drawChart(cv, d) {
   const W = cssW, H = cssH, padL = 6, padR = 52, padT = 12, vh = Math.round(H * 0.68), volH = H - vh - 28;
   const bars = d.bars || [];
   if (!bars.length) return;
+  cv.classList.add("drawn");
   let lo = Infinity, hi = -Infinity, vmax = 0;
   bars.forEach(b => { lo = Math.min(lo, b.low); hi = Math.max(hi, b.high); vmax = Math.max(vmax, b.vol); });
   const span = (hi - lo) || 1e-9;
@@ -537,11 +620,10 @@ function switchMarket(market) {
   if (S.market === market) return;
   S.market = market;
   S.kbars = {};
+  resetKlineQueue();
   if (market === "crypto") S.selBoard = null;   // 板块筛选仅 A股
   $("btnScan").textContent = scanBtnLabel();
   renderAll();
-  const data = market === "crypto" ? (S.crypto || {}) : (S.watch || {});
-  (data.candidates || []).filter(r => r.qualified).forEach(r => loadChart(r.code));
 }
 
 /* =============================== 启动 =============================== */

@@ -12,7 +12,7 @@ TradeGenuis · 箱体突破 本地看板服务器
   GET  /api/crypto          最近一次币圈扫描结果（磁盘缓存）
   GET  /api/pool            自选池
   POST /api/pool            增删自选池
-  GET  /api/kline?code=     个股日K（含箱体/试盘）
+  GET  /api/kline?code=     个股日K（含箱体/试盘；成功结果约 45 分钟内存+磁盘缓存）
   POST /api/scan            触发扫描 {mode, force}；1 小时内默认返回缓存
   GET  /api/status          扫描状态/日志
   GET/POST /api/config      配置（自动扫描 / Telegram）
@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -54,6 +55,11 @@ STATE = {
     "config": dict(DEFAULT_CONFIG),
 }
 LOCK = threading.Lock()
+# 日K 变化慢：内存 + 落盘约 45 分钟。与 SCAN_CACHE_TTL（扫描结果 1h）独立。
+KLINE_CACHE_TTL = 45 * 60
+KLINE_DISK_DIR = ROOT / "data" / "kline_cache"
+
+
 def as_truthy(v) -> bool:
     if v is True:
         return True
@@ -257,14 +263,100 @@ def get_quotes(codes: list[str]) -> dict:
     return out
 
 
-def get_kline(code: str, lmt: int = 160, market: str = "stock") -> dict | None:
+def _kline_today() -> str:
+    return datetime.now(sc.BJT).strftime("%Y-%m-%d")
+
+
+def _kline_mem_key(market: str, code: str):
+    return ("k", market, code)
+
+
+def _valid_kline_payload(payload) -> bool:
+    """成功日K才可缓存：拒绝 error 字段与空 bars（避免把失败当命中）。"""
+    if not isinstance(payload, dict) or payload.get("error"):
+        return False
+    bars = payload.get("bars")
+    return isinstance(bars, list) and len(bars) > 0
+
+
+def _kline_mem_get(market: str, code: str):
     with LOCK:
-        cached = STATE["kline_cache"].get(("k", market, code))
-        if cached and time.time() - cached[0] < CACHE_TTL:
-            return cached[1]
+        cached = STATE["kline_cache"].get(_kline_mem_key(market, code))
+    if not cached:
+        return None
+    ts, payload = cached
+    if time.time() - ts >= KLINE_CACHE_TTL:
+        return None
+    if not _valid_kline_payload(payload):
+        return None
+    return payload
+
+
+def _kline_mem_put(market: str, code: str, payload: dict) -> None:
+    if not _valid_kline_payload(payload):
+        return
+    with LOCK:
+        STATE["kline_cache"][_kline_mem_key(market, code)] = (time.time(), payload)
+
+
+def _kline_disk_path(market: str, code: str) -> Path:
+    safe_m = re.sub(r"[^a-z0-9]", "", (market or "stock").lower()) or "stock"
+    safe_c = re.sub(r"[^A-Za-z0-9._-]", "_", str(code or ""))[:48] or "unknown"
+    return KLINE_DISK_DIR / f"{safe_m}_{safe_c}_{_kline_today()}.json"
+
+
+def _kline_disk_get(market: str, code: str):
+    path = _kline_disk_path(market, code)
+    try:
+        if not path.is_file():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        ts = float(data.get("ts") or 0)
+        payload = data.get("payload")
+        if time.time() - ts >= KLINE_CACHE_TTL:
+            return None
+        if not _valid_kline_payload(payload):
+            return None
+        return payload
+    except Exception:
+        return None
+
+
+def _kline_disk_put(market: str, code: str, payload: dict) -> None:
+    if not _valid_kline_payload(payload):
+        return
+    try:
+        KLINE_DISK_DIR.mkdir(parents=True, exist_ok=True)
+        path = _kline_disk_path(market, code)
+        tmp = path.with_suffix(".json.tmp")
+        blob = json.dumps({"ts": time.time(), "payload": payload}, ensure_ascii=False)
+        tmp.write_text(blob, encoding="utf-8")
+        tmp.replace(path)
+        prefix = path.name.rsplit("_", 1)[0] + "_"
+        for old in KLINE_DISK_DIR.glob(f"{prefix}*.json"):
+            if old.resolve() != path.resolve():
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+    except Exception:
+        pass
+
+
+def get_kline(code: str, lmt: int = 160, market: str = "stock") -> dict | None:
+    """个股/币日K + 箱体。成功结果缓存 ~45 分钟；错误与空序列不写入。"""
+    hit = _kline_mem_get(market, code)
+    if hit:
+        return hit
+    hit = _kline_disk_get(market, code)
+    if hit:
+        _kline_mem_put(market, code, hit)
+        return hit
     try:
         if market == "crypto":
             bars = sc.fetch_crypto_kline(code)
+            if not bars:
+                return {"code": code, "error": "empty kline"}
             box = sc.compute_box(bars)
             payload = {
                 "code": code, "name": code, "price": bars[-1]["close"],
@@ -274,6 +366,8 @@ def get_kline(code: str, lmt: int = 160, market: str = "stock") -> dict | None:
         else:
             quote = sc.fetch_quote(code)
             bars = sc.fetch_kline(code, lmt=lmt)
+            if not bars:
+                return {"code": code, "error": "empty kline"}
             box = sc.compute_box(bars)
             payload = {
                 "code": code, "name": quote.get("name", ""),
@@ -281,8 +375,8 @@ def get_kline(code: str, lmt: int = 160, market: str = "stock") -> dict | None:
                 "turnover": quote["turnover"], "volume_ratio": quote["volume_ratio"],
                 "bar_date": bars[-1]["date"], "bars": bars, "box": box,
             }
-        with LOCK:
-            STATE["kline_cache"][("k", market, code)] = (time.time(), payload)
+        _kline_mem_put(market, code, payload)
+        _kline_disk_put(market, code, payload)
         return payload
     except Exception as e:
         return {"code": code, "error": str(e)[:150]}
