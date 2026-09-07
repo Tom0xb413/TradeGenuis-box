@@ -120,6 +120,35 @@
     .act.ghost:hover { color: var(--ink); background: var(--hover); }
     .cache-hint { font-family: var(--mono); font-size: 11px; color: var(--ink-faint); }
 
+    /* 全员共享扫描进度（服务端 STATE.scan_progress，各浏览器轮询同一份） */
+    .scan-progress {
+      background: var(--card); border: 1px solid var(--card-border);
+      border-radius: var(--r); padding: 10px 14px 12px;
+    }
+    .scan-progress[hidden] { display: none !important; }
+    .scan-progress-row {
+      display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px;
+    }
+    .scan-progress-title { font-size: 13px; font-weight: 600; }
+    .scan-progress-row .num { color: var(--up); font-weight: 700; font-size: 16px; margin-left: auto; }
+    .scan-progress-row .mono { font-size: 11px; color: var(--ink-faint); }
+    .scan-progress-track {
+      height: 6px; border-radius: 999px; background: var(--chip); overflow: hidden;
+    }
+    .scan-progress-fill {
+      height: 100%; width: 0%; border-radius: 999px; background: var(--up);
+      transition: width .35s ease;
+    }
+    .scan-progress.indeterminate .scan-progress-fill {
+      width: 32% !important; transition: none;
+      animation: scan-indet 1.2s ease-in-out infinite;
+    }
+    @keyframes scan-indet {
+      0% { transform: translateX(-120%); }
+      100% { transform: translateX(380%); }
+    }
+    .scan-progress-msg { margin-top: 6px; font-size: 12px; color: var(--ink-dim); }
+
     /* ================= 内容区 ================= */
     .card { background: var(--card); border: 1px solid var(--card-border); border-radius: var(--r); padding: 14px 16px; }
     .sec-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
@@ -222,6 +251,18 @@
     </div>
     <button class="act go" id="btnScan" type="button">全市场扫描</button>
     <button class="act ghost" id="btnForceScan" type="button" title="忽略1小时缓存，重新全量扫描" style="display:none">强制重扫</button>
+  </div>
+
+  <div class="scan-progress" id="scanProgress" hidden>
+    <div class="scan-progress-row">
+      <span class="scan-progress-title" id="scanProgressTitle">扫描进行中</span>
+      <span class="num" id="scanProgressPct">0%</span>
+      <span class="mono" id="scanProgressCount"></span>
+    </div>
+    <div class="scan-progress-track">
+      <div class="scan-progress-fill" id="scanProgressFill"></div>
+    </div>
+    <div class="scan-progress-msg" id="scanProgressMsg"></div>
   </div>
 
   <section class="card">
@@ -459,6 +500,7 @@ function renderAll() {
   }
   renderCards(rows);
   renderCfg();
+  renderScanProgress(S.status);
 }
 
 function renderCfg() {
@@ -861,38 +903,119 @@ async function refreshQuotes() {
 }
 
 /* =============================== 扫描 / 配置 =============================== */
-let scanning = false;
+let localScanWait = false;
+let scanPollTimer = null;
+let scanWasRunning = false;
 function scanBtnLabel() {
   return S.market === "crypto" ? "币圈扫描" : "全市场扫描";
 }
+function scanModeLabel(mode) {
+  return { market: "全市场扫描", quick: "全市场快扫", crypto: "币圈扫描", pool: "自选池扫描" }[mode] || "扫描";
+}
+function isScanRunning(st) {
+  if (!st) return false;
+  const sp = st.scan_progress || {};
+  return !!(st.scanning || sp.running);
+}
+function renderScanProgress(st) {
+  const bar = $("scanProgress");
+  if (!bar) return;
+  const sp = (st && st.scan_progress) || {};
+  const running = isScanRunning(st);
+  if (!running && !localScanWait) {
+    bar.hidden = true;
+    bar.classList.remove("indeterminate");
+    $("btnScan").disabled = false;
+    $("btnForceScan").disabled = false;
+    $("btnScan").textContent = scanBtnLabel();
+    return;
+  }
+  bar.hidden = false;
+  const pct = Number(sp.pct || 0);
+  const total = Number(sp.total || 0);
+  const done = Number(sp.done || 0);
+  $("scanProgressTitle").textContent = scanModeLabel(sp.mode) + (running ? "进行中" : "");
+  $("scanProgressPct").textContent = total > 0 ? (Math.round(pct * 10) / 10) + "%" : "…";
+  $("scanProgressMsg").textContent = sp.message || (running ? "扫描中…" : "");
+  $("scanProgressCount").textContent = total > 0 ? (done + " / " + total) : "";
+  const fill = $("scanProgressFill");
+  if (running && total <= 0) {
+    bar.classList.add("indeterminate");
+    fill.style.width = "32%";
+  } else {
+    bar.classList.remove("indeterminate");
+    fill.style.width = Math.max(0, Math.min(100, pct)) + "%";
+  }
+  $("btnScan").disabled = true;
+  $("btnForceScan").disabled = true;
+  $("btnScan").textContent = "扫描中…";
+}
+function ensureScanPoll() {
+  const need = localScanWait || isScanRunning(S.status);
+  if (need && !scanPollTimer) {
+    scanPollTimer = setInterval(tickScanStatus, 1000);
+  } else if (!need && scanPollTimer) {
+    clearInterval(scanPollTimer);
+    scanPollTimer = null;
+  }
+}
+async function tickScanStatus() {
+  try {
+    const st = await jfetch("api/status");
+    const was = scanWasRunning || isScanRunning(S.status) || localScanWait;
+    S.status = st;
+    const nowRun = isScanRunning(st);
+    scanWasRunning = nowRun;
+    renderScanProgress(st);
+    if (was && !nowRun) {
+      localScanWait = false;
+      await refresh();
+      toast("扫描完成");
+      renderScanProgress(S.status);
+    }
+    ensureScanPoll();
+  } catch (e) {}
+}
 async function doScan(force) {
-  if (scanning) return;
-  const mode = S.market === "crypto" ? "crypto" : "market";
-  scanning = true; $("btnScan").disabled = true; $("btnForceScan").disabled = true;
-  $("btnScan").textContent = force ? "强制重扫中…" : "扫描中…";
+  if (localScanWait) {
+    ensureScanPoll();
+    return;
+  }
+  localScanWait = true;
+  renderScanProgress(S.status || { scanning: true, scan_progress: { running: true, message: "正在请求扫描…" } });
+  ensureScanPoll();
   try {
     const r = await jfetch("api/scan" + (force ? "?force=1" : ""), {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode, force: !!force })
+      body: JSON.stringify({ mode: S.market === "crypto" ? "crypto" : "market", force: !!force })
     });
-    if (r.status === "running") toast("扫描已在进行中");
-    else if (r.from_cache || r.status === "cached") {
-      if (mode === "crypto") S.crypto = r; else S.watch = r;
+    if (r.status === "running") {
+      S.status = {
+        scanning: true,
+        scan_progress: r.scan_progress || (S.status && S.status.scan_progress),
+        scan_log: r.scan_log
+      };
+      renderScanProgress(S.status);
+      toast("已加入当前扫描");
+      ensureScanPoll();
+    } else if (r.from_cache || r.status === "cached") {
+      localScanWait = false;
+      if (S.market === "crypto") S.crypto = r; else S.watch = r;
       renderAll();
       toast("缓存 · 1小时内未重复全量扫描");
+      ensureScanPoll();
     } else {
-      for (let i = 0; i < 200; i++) {
-        await new Promise(res => setTimeout(res, 3000));
-        const st = await jfetch("api/status");
-        S.status = st;
-        if (!st.scanning) { await refresh(); toast("扫描完成"); break; }
-      }
+      S.status = { scanning: true, scan_progress: r.scan_progress || { running: true, mode: S.market === "crypto" ? "crypto" : "market" } };
+      scanWasRunning = true;
+      renderScanProgress(S.status);
+      ensureScanPoll();
     }
   } catch (e) {
+    localScanWait = false;
     toast("扫描失败");
+    renderScanProgress(S.status);
+    ensureScanPoll();
   }
-  scanning = false; $("btnScan").disabled = false; $("btnForceScan").disabled = false;
-  $("btnScan").textContent = scanBtnLabel();
 }
 
 async function saveCfg() {
@@ -992,9 +1115,18 @@ function boot() {
   document.querySelectorAll("#flagFilterTabs .tab").forEach(t => {
     t.addEventListener("click", () => setFlagFilter(t.dataset.flagFilter));
   });
-  refresh().then(() => refreshQuotes());
+  refresh().then(() => {
+    refreshQuotes();
+    if (isScanRunning(S.status)) {
+      scanWasRunning = true;
+      renderScanProgress(S.status);
+      ensureScanPoll();
+    }
+  });
   setInterval(refreshQuotes, 3000);
-  setInterval(() => { if (!scanning) refresh().catch(() => {}); }, 300000);
+  setInterval(() => {
+    if (!localScanWait && !isScanRunning(S.status)) refresh().catch(() => {});
+  }, 300000);
 }
 boot();
 </script>
