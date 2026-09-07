@@ -84,10 +84,12 @@ class ScanCacheResponseTest(unittest.TestCase):
         self.p_watch.start()
         self.p_crypto.start()
         server.STATE["scanning"] = False
+        server.STATE["config"] = dict(server.DEFAULT_CONFIG)
 
     def tearDown(self):
         self.p_watch.stop()
         self.p_crypto.stop()
+        server.STATE["config"] = dict(server.DEFAULT_CONFIG)
         self.tmp.cleanup()
 
     def test_serves_fresh_market_cache(self):
@@ -130,6 +132,7 @@ class ScanPostHttpTest(unittest.TestCase):
         for p in self.patches:
             p.start()
         server.STATE["scanning"] = False
+        server.STATE["config"] = dict(server.DEFAULT_CONFIG)
         self.universe_calls = []
 
         def boom(*_a, **_k):

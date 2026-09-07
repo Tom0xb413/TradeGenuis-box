@@ -12,6 +12,8 @@
 
 四条件 100 分制**不因模式改权重**：P0/P1 只改变箱体几何与 `tests` 计数，评分仍用 `tests≥3` 等原规则。
 
+形态族 `pattern_family`（`box` | `high_flag`）是另一层开关：`box` 时本文件的模式全部有效；`high_flag` 时走旗形检测，见 [pattern-high-flag.md](pattern-high-flag.md)。缓存身份同时包含 `pattern_family`。
+
 ## classic（默认）
 
 - 窗口：最近 60 根；若最近 15 根内收盘有效突破「前 40 根最高价 × 1.005」，窗口截止到突破日（不含突破 K）。

@@ -19,6 +19,10 @@
   - **P1通道**：斜向通道（OLS 中轴 + 残差 95%/5% 分位带 + 温和斜率/R²/ADX）；K 线画斜轨
   - 切换后 K 线箱体立即按新模式绘制；评分需「强制重扫」。参数与字段见 [docs/box-modes.md](docs/box-modes.md)
   - **试盘 vs 真突破**（元数据，不改四条件满分）：相对当前模式上沿 R 标注 `edge_event`（`test` / `breakout_candidate` / `breakout_confirmed` / `breakout_failed`）。确认突破为 t+2 事后标签
+- **形态族**（横幅「形态」，写入 `pattern_family`，默认 `box` 不打断现有用户）：
+  - **箱体/通道**（`box`）：上述箱体模式与四条件评分
+  - **高位旗形(杯柄)**（`high_flag`）：放量 pole → 高位浅回撤缩量旗面 → 可选二次买点。批量筛选「仅旗形 / 仅二次买点」，不改四条件 100 分。参数见 [docs/pattern-high-flag.md](docs/pattern-high-flag.md)
+  - 切换形态后须强制重扫；扫描缓存身份含 `pattern_family`，避免串用 1 小时结果
 - **结果优先的图形化看板**：只展示达标标的，每张卡片内嵌 K 线（含成交量、箱体虚线、悬浮十字提示）、四条件状态、评分徽章
 - **自动扫描调度**：每个交易日 11:30（午间收盘）/ 15:00（收盘）各扫一次，服务端常驻调度
 - **实时行情刷新**：达标标的每 3 秒静默刷新价格/涨跌
@@ -88,9 +92,11 @@ python3 scanner.py --push        # 扫描并推送
 | `start.sh` | 一键启动脚本（装依赖 + 首次扫描 + 起服务） |
 | `scanner.py` | 扫描引擎：拉数据 → 四条件打分 → 写 JSON / 推 Telegram |
 | `box_engine.py` | 箱体识别：`classic` / `p0` / `p1` 斜向通道 |
+| `pattern_flag.py` | 高位旗形 / 杯柄（柄）：pole + 缩量旗面 + 二次买点 |
 | `server.py` | 本地看板服务器（纯标准库，默认端口 8808） |
 | `dashboard.html` | 看板页（TradeGenuis 深色主题，自托管字体） |
 | `docs/box-modes.md` | 箱体模式参数（含 P1 定稿） |
+| `docs/pattern-high-flag.md` | 高位旗形参数与 Bull Flag / 杯柄 / 突破中继 |
 | `data/pool.json` | 自选池（`code` 必填） |
 | `data/sectors.json` | 用户自定义关注板块 |
 | `data/*.json` | 扫描结果与缓存（自动生成，已在 .gitignore） |

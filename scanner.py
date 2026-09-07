@@ -8,6 +8,7 @@
   2. 倍量启动持续≥3日 —— 腾讯前复权日K：成交量 ≥ 前 5 日均量 1.8 倍的连续天数
   3. 主力资金持续流入+高度控盘 —— 东财资金流（近5日主力净流入）+ 股东户数环比（筹码集中度）
   4. 箱体上沿试盘≥3次 —— 日K自动识别箱体（classic / p0 / p1 斜向通道，见 box_engine.py）
+形态族 pattern_family：box（默认，四条件箱体）| high_flag（高位旗形/杯柄，见 pattern_flag.py）
 
 数据源（全部公开接口，无需 Key；东财 push2 不可用时自动降级）：
   日K/现价 ：web.ifzq.gtimg.cn（腾讯）  备用 hq.sinajs.cn / money.finance.sina.com.cn
@@ -52,6 +53,13 @@ from box_engine import (
     compute_box_p0,
     compute_box_p1,
     normalize_box_mode,
+)
+from pattern_flag import (
+    DEFAULT_PATTERN_FAMILY,
+    PATTERN_FAMILIES,
+    detect_high_flag,
+    flag_row_fields,
+    normalize_pattern_family,
 )
 
 # --------------------------------------------------------------------------- #
@@ -227,6 +235,8 @@ def decorate_scan_payload(payload: dict) -> dict:
     payload["items"] = list(rows)
     if "box_mode" not in payload:
         payload["box_mode"] = load_box_mode()
+    if "pattern_family" not in payload:
+        payload["pattern_family"] = load_pattern_family()
     return payload
 
 
@@ -237,6 +247,15 @@ def load_box_mode() -> str:
         return normalize_box_mode(cfg.get("box_mode"))
     except Exception:
         return DEFAULT_BOX_MODE
+
+
+def load_pattern_family() -> str:
+    """读取 data/config.json 的 pattern_family；缺省 box，不改变现有用户行为。"""
+    try:
+        cfg = json.loads((DATA / "config.json").read_text(encoding="utf-8"))
+        return normalize_pattern_family(cfg.get("pattern_family"))
+    except Exception:
+        return DEFAULT_PATTERN_FAMILY
 
 
 def is_trading_time() -> bool:
@@ -896,6 +915,7 @@ def analyze(code: str, name: str, theme_hint: str,
         "volume_ratio_raw": vol["volume_ratio"],
         "volume_days": vol["volume_days"],
         **box_row_fields(box, mode),
+        **flag_row_fields(detect_high_flag(bars)),
         "fund_5d": fund["fund_5d"],
         "inflow_days": fund["inflow_days"],
         "fund_state": fund["fund_state"],
@@ -917,6 +937,7 @@ def run_scan(network: bool = True, progress=None) -> list[dict]:
     """执行扫描，写 data/watchlist.json，返回候选行。"""
     pool = load_pool()
     box_mode = load_box_mode()
+    pattern_family = load_pattern_family()
     hot_topics, hot_names = ([], set())
     if network:
         if progress:
@@ -935,6 +956,7 @@ def run_scan(network: bool = True, progress=None) -> list[dict]:
                 "price": None, "chg": None, "theme_hint": s.get("theme", ""),
                 "theme_ok": False, "volume_days": 0, "volume_ratio": 0.0,
                 **box_row_fields(None, box_mode),
+                **flag_row_fields(None),
                 "fund_state": "无数据", "control": "—", "error": str(e)[:120],
                 "flags": [f"数据错误:{str(e)[:40]}", 0],
             }))
@@ -947,6 +969,7 @@ def run_scan(network: bool = True, progress=None) -> list[dict]:
         "scope": "pool",
         "pool_size": len(rows),
         "box_mode": box_mode,
+        "pattern_family": pattern_family,
         "hot_topics": [{"code": b["code"], "name": b["name"],
                         "chg1": b["chg1"], "chg5": b["chg5"]} for b in hot_topics],
         "candidates": rows,
@@ -1255,6 +1278,7 @@ def analyze_market(s: dict, hot_names: set[str], box_mode: str | None = None) ->
             "volume_ratio_raw": vol["volume_ratio"],
             "volume_days": vol["volume_days"],
             **box_row_fields(box, mode),
+            **flag_row_fields(detect_high_flag(bars)),
             "fund_5d": fund["fund_5d"],
             "inflow_days": fund["inflow_days"],
             "fund_state": fund["fund_state"],
@@ -1273,7 +1297,8 @@ def analyze_market(s: dict, hot_names: set[str], box_mode: str | None = None) ->
 
 
 def _save_market(rows: list[dict], stocks: list[dict], hot_topics: list[dict],
-                 done: int, total: int, final: bool, box_mode: str | None = None) -> None:
+                 done: int, total: int, final: bool, box_mode: str | None = None,
+                 pattern_family: str | None = None) -> None:
     payload = decorate_scan_payload({
         "as_of": now_str(),
         "strategy": "箱体突破战法",
@@ -1284,6 +1309,8 @@ def _save_market(rows: list[dict], stocks: list[dict], hot_topics: list[dict],
         "scanned": done,
         "done": final,
         "box_mode": normalize_box_mode(box_mode or load_box_mode()),
+        "pattern_family": normalize_pattern_family(
+            pattern_family or load_pattern_family()),
         "hot_topics": [{"code": b["code"], "name": b["name"],
                         "chg1": b["chg1"], "chg5": b["chg5"]} for b in hot_topics],
         "candidates": rows,
@@ -1304,6 +1331,7 @@ def run_market_scan(full: bool = True, top: int = MARKET_TOP,
     stocks = fetch_universe(force=force_universe)
     pool_codes = {p["code"] for p in load_pool()}
     box_mode = load_box_mode()
+    pattern_family = load_pattern_family()
     if full:
         picked = list(stocks)
         if progress:
@@ -1315,7 +1343,8 @@ def run_market_scan(full: bool = True, top: int = MARKET_TOP,
 
     hot_topics, hot_names = fetch_hot_topics()
     if progress:
-        progress(f"热点概念 TOP{len(hot_topics)} 已就绪，箱体模式 {box_mode}，开始并发深度计算（{workers} 线程）…")
+        progress(f"热点概念 TOP{len(hot_topics)} 已就绪，形态 {pattern_family}，"
+                 f"箱体模式 {box_mode}，开始并发深度计算（{workers} 线程）…")
 
     rows, done = [], 0
     lock = threading.Lock()
@@ -1332,7 +1361,7 @@ def run_market_scan(full: bool = True, top: int = MARKET_TOP,
                 if done % 300 == 0:          # 断点保护：每 300 只落盘一次
                     _save_market(sorted(rows, key=lambda r: r.get("score") or 0, reverse=True),
                                  stocks, hot_topics, done, len(picked), final=False,
-                                 box_mode=box_mode)
+                                 box_mode=box_mode, pattern_family=pattern_family)
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = [ex.submit(one, s) for s in picked]
@@ -1346,11 +1375,14 @@ def run_market_scan(full: bool = True, top: int = MARKET_TOP,
 
     rows.sort(key=lambda r: (r.get("score") or 0, r.get("volume_ratio") or 0,
                              r.get("chg") or 0), reverse=True)
-    _save_market(rows, stocks, hot_topics, done, len(picked), final=True, box_mode=box_mode)
+    _save_market(rows, stocks, hot_topics, done, len(picked), final=True,
+                 box_mode=box_mode, pattern_family=pattern_family)
     skipped = len(picked) - len(rows)
+    n_flag = sum(1 for r in rows if r.get("pattern") == "high_flag")
     if progress:
+        extra = f"，旗形 {n_flag} 只" if pattern_family == "high_flag" else ""
         progress(f"完成：有效评分 {len(rows)} 只（数据不足跳过 {skipped} 只），"
-                 f"达标 {sum(1 for r in rows if r.get('qualified'))} 只")
+                 f"达标 {sum(1 for r in rows if r.get('qualified'))} 只{extra}")
     return rows
 
 
@@ -1528,6 +1560,7 @@ def analyze_crypto(sym: str, price: float, chg: float,
         "turnover": None, "volume_ratio": vol["volume_ratio"],
         "volume_days": vol["volume_days"],
         **box_row_fields(box, mode),
+        **flag_row_fields(detect_high_flag(bars)),
         # 币圈无资金流/控盘/热点 → 恒空，对应条件按币圈口径折中给分
         "fund_5d": None, "inflow_days": 0, "fund_state": "—",
         "control": "—", "holder_ratio": None, "control_note": "",
@@ -1543,13 +1576,15 @@ def run_crypto_scan(top: int = CRYPTO_TOP_N, workers: int = 8,
     """币圈扫描：24h 涨幅 top N 进池 → 复用箱体引擎打分。"""
     reset_crypto_backend()
     box_mode = load_box_mode()
+    pattern_family = load_pattern_family()
     if progress:
         progress("拉取 USDT 永续 24h 行情（Binance，失败则 Gate.io）…")
     tickers = fetch_crypto_tickers()
     src = "Gate.io" if _crypto_backend == "gate" else "Binance"
     pool = tickers[:top]
     if progress:
-        progress(f"{src} 24h 涨幅前 {len(pool)} 进入池子，箱体模式 {box_mode}，开始箱体扫描（{workers} 线程）…")
+        progress(f"{src} 24h 涨幅前 {len(pool)} 进入池子，形态 {pattern_family}，"
+                 f"箱体模式 {box_mode}，开始扫描（{workers} 线程）…")
 
     rows, done = [], 0
     lock = threading.Lock()
@@ -1586,6 +1621,7 @@ def run_crypto_scan(top: int = CRYPTO_TOP_N, workers: int = 8,
         "scanned": len(pool),
         "done": True,
         "box_mode": box_mode,
+        "pattern_family": pattern_family,
         "hot_topics": [],
         "candidates": rows,
         "source": "gate" if _crypto_backend == "gate" else "binance",
