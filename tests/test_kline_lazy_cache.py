@@ -331,6 +331,7 @@ class DashboardStampedeHeadlessTest(unittest.TestCase):
         self.watch.write_text(json.dumps(_watch_payload()), encoding="utf-8")
         self.crypto.write_text(json.dumps(_crypto_payload()), encoding="utf-8")
         server.STATE["kline_cache"] = {}
+        server.reset_scan_runtime_state()
         self.lock = threading.Lock()
         self.inflight = 0
         self.max_inflight = 0

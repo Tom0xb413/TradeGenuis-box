@@ -83,7 +83,7 @@ class ScanCacheResponseTest(unittest.TestCase):
         self.p_crypto = patch.object(sc, "CRYPTO_FILE", self.crypto)
         self.p_watch.start()
         self.p_crypto.start()
-        server.STATE["scanning"] = False
+        server.reset_scan_runtime_state()
         server.STATE["config"] = dict(server.DEFAULT_CONFIG)
 
     def tearDown(self):
@@ -131,7 +131,7 @@ class ScanPostHttpTest(unittest.TestCase):
         ]
         for p in self.patches:
             p.start()
-        server.STATE["scanning"] = False
+        server.reset_scan_runtime_state()
         server.STATE["config"] = dict(server.DEFAULT_CONFIG)
         self.universe_calls = []
 
@@ -155,6 +155,7 @@ class ScanPostHttpTest(unittest.TestCase):
         self.p_scan.stop()
         for p in self.patches:
             p.stop()
+        server.reset_scan_runtime_state()
         self.tmp.cleanup()
 
     def _post(self, body: dict, query: str = ""):
@@ -172,6 +173,8 @@ class ScanPostHttpTest(unittest.TestCase):
         self.assertEqual(out.get("status"), "cached")
         self.assertEqual(self.universe_calls, [])
         self.assertEqual(out["candidates"][0]["code"], "000001")
+        self.assertIn("scan_progress", out)
+        self.assertFalse(out.get("scanning"))
 
     def test_post_force_query_does_not_use_cache(self):
         out = self._post({"mode": "market", "force": True}, query="?force=1")

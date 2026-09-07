@@ -82,6 +82,11 @@ HOLDER_HIGH = -2.0      # 股东户数环比 ≤ -2% → 高控盘
 HOLDER_MID = 0.5        # ≤ 0.5% → 中控盘，否则偏低
 TURNOVER_CAP = 15.0     # 换手率超 15% 视为分歧大，控盘降级
 SCAN_CACHE_TTL = 3600   # 看板「全市场/币圈扫描」结果缓存秒数；调度任务强制刷新
+SCAN_WORKERS_DEFAULT = 16
+SCAN_WORKERS_MIN = 4
+SCAN_WORKERS_MAX = 32
+# 兼容旧名：实际并发以 resolve_scan_workers() 为准（环境变量 / config / 默认 16）
+MARKET_WORKERS = SCAN_WORKERS_DEFAULT
 
 # --------------------------------------------------------------------------- #
 # HTTP 会话（自动重试）
@@ -182,6 +187,56 @@ def now_str() -> str:
 def iso_now() -> str:
     """北京时间 ISO-8601（带 +08:00），写入扫描结果 updated 字段。"""
     return datetime.now(BJT).isoformat(timespec="seconds")
+
+
+def clamp_scan_workers(n) -> int:
+    """把并发数钳制到 4–32；无法解析时回退默认 16。"""
+    try:
+        v = int(n)
+    except (TypeError, ValueError):
+        return SCAN_WORKERS_DEFAULT
+    return max(SCAN_WORKERS_MIN, min(SCAN_WORKERS_MAX, v))
+
+
+def load_configured_scan_workers() -> int | None:
+    """读取 data/config.json 的 scan_workers；缺失或非法则 None。"""
+    try:
+        cfg = json.loads((DATA / "config.json").read_text(encoding="utf-8"))
+        v = cfg.get("scan_workers")
+        if v is None or v == "":
+            return None
+        return int(v)
+    except Exception:
+        return None
+
+
+def resolve_scan_workers(explicit: int | None = None) -> int:
+    """
+    扫描线程数：显式参数 > 环境变量 SCAN_WORKERS > config.json scan_workers > 16。
+    结果钳制到 4–32。上游限流报错增多时可把并发降到 8 或 4。
+    """
+    if explicit is not None:
+        return clamp_scan_workers(explicit)
+    env = os.environ.get("SCAN_WORKERS") or os.environ.get("scan_workers")
+    if env is not None and str(env).strip() != "":
+        try:
+            return clamp_scan_workers(int(str(env).strip()))
+        except (TypeError, ValueError):
+            pass
+    cfg_n = load_configured_scan_workers()
+    if cfg_n is not None:
+        return clamp_scan_workers(cfg_n)
+    return SCAN_WORKERS_DEFAULT
+
+
+def emit_progress(progress, msg: str, **kwargs) -> None:
+    """调用进度回调。兼容只接收 str 的旧 lambda，以及接受 phase/done/total 的新回调。"""
+    if not progress:
+        return
+    try:
+        progress(msg, **kwargs)
+    except TypeError:
+        progress(msg)
 
 
 def parse_updated(payload: dict | None) -> datetime | None:
@@ -933,25 +988,26 @@ def analyze(code: str, name: str, theme_hint: str,
     return score_row(row)
 
 
-def run_scan(network: bool = True, progress=None) -> list[dict]:
-    """执行扫描，写 data/watchlist.json，返回候选行。"""
+def run_scan(network: bool = True, progress=None, workers: int | None = None) -> list[dict]:
+    """执行扫描，写 data/watchlist.json，返回候选行。自选池与全市场/币圈一样按 scan_workers 并发。"""
     pool = load_pool()
     box_mode = load_box_mode()
     pattern_family = load_pattern_family()
+    n_workers = resolve_scan_workers(workers)
     hot_topics, hot_names = ([], set())
     if network:
-        if progress:
-            progress("拉取热点概念板块…")
+        emit_progress(progress, "拉取热点概念板块…", phase="hot", done=0, total=len(pool))
         hot_topics, hot_names = fetch_hot_topics()
 
-    rows = []
-    for i, s in enumerate(pool):
-        if progress:
-            progress(f"[{i + 1}/{len(pool)}] 分析 {s['code']} {s['name']}")
+    total = len(pool)
+    emit_progress(progress, f"自选池 {total} 只，{n_workers} 线程并发分析…",
+                  phase="analyze", done=0, total=total)
+
+    def one(s: dict) -> dict:
         try:
-            rows.append(analyze(s["code"], s["name"], s["theme"], hot_names, box_mode=box_mode))
+            return analyze(s["code"], s["name"], s["theme"], hot_names, box_mode=box_mode)
         except Exception as e:
-            rows.append(score_row({
+            return score_row({
                 "code": s["code"], "name": s["name"] or s["code"],
                 "price": None, "chg": None, "theme_hint": s.get("theme", ""),
                 "theme_ok": False, "volume_days": 0, "volume_ratio": 0.0,
@@ -959,8 +1015,24 @@ def run_scan(network: bool = True, progress=None) -> list[dict]:
                 **flag_row_fields(None),
                 "fund_state": "无数据", "control": "—", "error": str(e)[:120],
                 "flags": [f"数据错误:{str(e)[:40]}", 0],
-            }))
-        time.sleep(0.12)
+            })
+
+    rows, done = [], 0
+    lock = threading.Lock()
+    if total:
+        with ThreadPoolExecutor(max_workers=n_workers) as ex:
+            futs = {ex.submit(one, s): s for s in pool}
+            for f in as_completed(futs):
+                rows.append(f.result())
+                s = futs[f]
+                with lock:
+                    done += 1
+                    n_done = done
+                emit_progress(
+                    progress,
+                    f"[{n_done}/{total}] 分析 {s.get('code', '')} {s.get('name', '')}",
+                    phase="analyze", done=n_done, total=total,
+                )
 
     rows.sort(key=lambda r: (r.get("score") or 0, r.get("chg") or 0), reverse=True)
     payload = decorate_scan_payload({
@@ -986,7 +1058,6 @@ UNIVERSE_FILE = DATA / "universe.json"
 MKT_CACHE_FILE = DATA / "mkt_cache.json"
 UNIVERSE_FS = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"   # 深主板A+创业板+沪主板A+科创板
 MARKET_TOP = 200       # 默认深度计算候选数
-MARKET_WORKERS = 8     # 并发
 SCREEN_VR = 1.2        # 粗筛：量比 ≥ 1.2 且当日上涨未涨停
 CACHE_LOCK = threading.Lock()
 _mkt_cache: dict | None = None
@@ -1320,34 +1391,37 @@ def _save_market(rows: list[dict], stocks: list[dict], hot_topics: list[dict],
 
 
 def run_market_scan(full: bool = True, top: int = MARKET_TOP,
-                    workers: int = MARKET_WORKERS, progress=None,
+                    workers: int | None = None, progress=None,
                     force_universe: bool = False) -> list[dict]:
     """
     全市场扫描。full=True：沪深全部 A 股逐一深度计算（无粗筛）；
     full=False（快扫）：量比粗筛 TOP N 后深度计算。
+    workers 默认走 resolve_scan_workers()（4–32，默认 16）。
     """
-    if progress:
-        progress("拉取沪深 A 股全量清单（首次较慢，此后按日缓存）…")
+    n_workers = resolve_scan_workers(workers)
+    emit_progress(progress, "拉取沪深 A 股全量清单（首次较慢，此后按日缓存）…",
+                  phase="universe", done=0, total=0)
     stocks = fetch_universe(force=force_universe)
     pool_codes = {p["code"] for p in load_pool()}
     box_mode = load_box_mode()
     pattern_family = load_pattern_family()
     if full:
         picked = list(stocks)
-        if progress:
-            progress(f"全市场 {len(stocks)} 只，全部深度计算（无粗筛）…")
+        emit_progress(progress, f"全市场 {len(stocks)} 只，全部深度计算（无粗筛）…",
+                      phase="analyze", done=0, total=len(picked))
     else:
         picked = screen_universe(stocks, top, pool_codes)
-        if progress:
-            progress(f"全市场 {len(stocks)} 只 → 快扫粗筛出 {len(picked)} 只候选")
+        emit_progress(progress, f"全市场 {len(stocks)} 只 → 快扫粗筛出 {len(picked)} 只候选",
+                      phase="analyze", done=0, total=len(picked))
 
     hot_topics, hot_names = fetch_hot_topics()
-    if progress:
-        progress(f"热点概念 TOP{len(hot_topics)} 已就绪，形态 {pattern_family}，"
-                 f"箱体模式 {box_mode}，开始并发深度计算（{workers} 线程）…")
+    emit_progress(progress, f"热点概念 TOP{len(hot_topics)} 已就绪，形态 {pattern_family}，"
+                  f"箱体模式 {box_mode}，开始并发深度计算（{n_workers} 线程）…",
+                  phase="analyze", done=0, total=len(picked))
 
     rows, done = [], 0
     lock = threading.Lock()
+    n_picked = len(picked)
 
     def one(s: dict):
         nonlocal done
@@ -1356,14 +1430,17 @@ def run_market_scan(full: bool = True, top: int = MARKET_TOP,
         finally:
             with lock:
                 done += 1
-                if progress and done % 100 == 0:
-                    progress(f"深度计算 {done}/{len(picked)}，已有效 {len(rows)} 只")
-                if done % 300 == 0:          # 断点保护：每 300 只落盘一次
+                n_done = done
+                n_rows = len(rows)
+                do_save = n_done % 300 == 0
+                if do_save:
                     _save_market(sorted(rows, key=lambda r: r.get("score") or 0, reverse=True),
-                                 stocks, hot_topics, done, len(picked), final=False,
+                                 stocks, hot_topics, n_done, n_picked, final=False,
                                  box_mode=box_mode, pattern_family=pattern_family)
+            emit_progress(progress, f"深度计算 {n_done}/{n_picked}，已有效 {n_rows} 只",
+                          phase="analyze", done=n_done, total=n_picked)
 
-    with ThreadPoolExecutor(max_workers=workers) as ex:
+    with ThreadPoolExecutor(max_workers=n_workers) as ex:
         futs = [ex.submit(one, s) for s in picked]
         for f in as_completed(futs):
             try:
@@ -1375,14 +1452,14 @@ def run_market_scan(full: bool = True, top: int = MARKET_TOP,
 
     rows.sort(key=lambda r: (r.get("score") or 0, r.get("volume_ratio") or 0,
                              r.get("chg") or 0), reverse=True)
-    _save_market(rows, stocks, hot_topics, done, len(picked), final=True,
+    _save_market(rows, stocks, hot_topics, done, n_picked, final=True,
                  box_mode=box_mode, pattern_family=pattern_family)
-    skipped = len(picked) - len(rows)
+    skipped = n_picked - len(rows)
     n_flag = sum(1 for r in rows if r.get("pattern") == "high_flag")
-    if progress:
-        extra = f"，旗形 {n_flag} 只" if pattern_family == "high_flag" else ""
-        progress(f"完成：有效评分 {len(rows)} 只（数据不足跳过 {skipped} 只），"
-                 f"达标 {sum(1 for r in rows if r.get('qualified'))} 只{extra}")
+    extra = f"，旗形 {n_flag} 只" if pattern_family == "high_flag" else ""
+    emit_progress(progress, f"完成：有效评分 {len(rows)} 只（数据不足跳过 {skipped} 只），"
+                  f"达标 {sum(1 for r in rows if r.get('qualified'))} 只{extra}",
+                  phase="save", done=n_picked, total=n_picked)
     return rows
 
 
@@ -1571,23 +1648,25 @@ def analyze_crypto(sym: str, price: float, chg: float,
     return score_row(row)
 
 
-def run_crypto_scan(top: int = CRYPTO_TOP_N, workers: int = 8,
+def run_crypto_scan(top: int = CRYPTO_TOP_N, workers: int | None = None,
                     progress=None) -> list[dict]:
     """币圈扫描：24h 涨幅 top N 进池 → 复用箱体引擎打分。"""
+    n_workers = resolve_scan_workers(workers)
     reset_crypto_backend()
     box_mode = load_box_mode()
     pattern_family = load_pattern_family()
-    if progress:
-        progress("拉取 USDT 永续 24h 行情（Binance，失败则 Gate.io）…")
+    emit_progress(progress, "拉取 USDT 永续 24h 行情（Binance，失败则 Gate.io）…",
+                  phase="universe", done=0, total=0)
     tickers = fetch_crypto_tickers()
     src = "Gate.io" if _crypto_backend == "gate" else "Binance"
     pool = tickers[:top]
-    if progress:
-        progress(f"{src} 24h 涨幅前 {len(pool)} 进入池子，形态 {pattern_family}，"
-                 f"箱体模式 {box_mode}，开始扫描（{workers} 线程）…")
+    emit_progress(progress, f"{src} 24h 涨幅前 {len(pool)} 进入池子，形态 {pattern_family}，"
+                  f"箱体模式 {box_mode}，开始扫描（{n_workers} 线程）…",
+                  phase="analyze", done=0, total=len(pool))
 
     rows, done = [], 0
     lock = threading.Lock()
+    n_pool = len(pool)
 
     def one(sym: str, price: float, chg: float):
         nonlocal done
@@ -1597,10 +1676,11 @@ def run_crypto_scan(top: int = CRYPTO_TOP_N, workers: int = 8,
         finally:
             with lock:
                 done += 1
-                if progress and done % 5 == 0:
-                    progress(f"币圈扫描 {done}/{len(pool)}")
+                n_done = done
+            emit_progress(progress, f"币圈扫描 {n_done}/{n_pool}",
+                          phase="analyze", done=n_done, total=n_pool)
 
-    with ThreadPoolExecutor(max_workers=workers) as ex:
+    with ThreadPoolExecutor(max_workers=n_workers) as ex:
         futs = [ex.submit(one, t["symbol"], t["price"], t["chg"]) for t in pool]
         for f in as_completed(futs):
             try:
@@ -1628,8 +1708,8 @@ def run_crypto_scan(top: int = CRYPTO_TOP_N, workers: int = 8,
     })
     DATA.mkdir(parents=True, exist_ok=True)
     CRYPTO_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    if progress:
-        progress(f"币圈完成：有效评分 {len(rows)} 只，达标 {sum(1 for r in rows if r.get('qualified'))} 只")
+    emit_progress(progress, f"币圈完成：有效评分 {len(rows)} 只，达标 {sum(1 for r in rows if r.get('qualified'))} 只",
+                  phase="save", done=n_pool, total=n_pool)
     return rows
 
 
@@ -1750,16 +1830,28 @@ def main() -> int:
                     help="快扫模式：量比粗筛 TOP N 后深度计算（仅配合 --market）")
     ap.add_argument("--top", type=int, default=MARKET_TOP,
                     help=f"快扫深度计算候选数（默认 {MARKET_TOP}，仅 --quick 生效）")
-    ap.add_argument("--workers", type=int, default=MARKET_WORKERS,
-                    help=f"并发线程数（默认 {MARKET_WORKERS}）")
+    ap.add_argument("--workers", type=int, default=None,
+                    help=f"并发线程数（默认 {SCAN_WORKERS_DEFAULT}，范围 {SCAN_WORKERS_MIN}–{SCAN_WORKERS_MAX}；"
+                         f"亦可用环境变量 SCAN_WORKERS 或 config.json scan_workers）")
     args = ap.parse_args()
 
     if args.test_push:
         return 0 if telegram_send(f"箱体突破看板连通测试 {now_str()}") else 1
 
-    def prog(msg: str):
-        if not args.cron:
-            print(msg, flush=True)
+    n_workers = resolve_scan_workers(args.workers)
+
+    def prog(msg: str, **kwargs):
+        if args.cron:
+            return
+        done, total = kwargs.get("done"), kwargs.get("total")
+        if done is not None and total:
+            try:
+                d, t = int(done), int(total)
+            except (TypeError, ValueError):
+                d, t = 0, 0
+            if t > 40 and d not in (0, 1, t) and d % 25 != 0:
+                return
+        print(msg, flush=True)
 
     if args.no_network:
         raw = json.loads(WATCH_FILE.read_text(encoding="utf-8")) if WATCH_FILE.exists() else {
@@ -1772,12 +1864,12 @@ def main() -> int:
         decorate_scan_payload(payload)
         WATCH_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     elif args.crypto:
-        rows = run_crypto_scan(top=CRYPTO_TOP_N, workers=args.workers, progress=prog)
+        rows = run_crypto_scan(top=CRYPTO_TOP_N, workers=n_workers, progress=prog)
     elif args.market:
         rows = run_market_scan(full=not args.quick, top=args.top,
-                               workers=args.workers, progress=prog)
+                               workers=n_workers, progress=prog)
     else:
-        rows = run_scan(network=True, progress=prog)
+        rows = run_scan(network=True, progress=prog, workers=n_workers)
 
     if not args.quiet:
         print_table(rows[:30])
