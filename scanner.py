@@ -9,11 +9,13 @@
   3. 主力资金持续流入+高度控盘 —— 东财资金流（近5日主力净流入）+ 股东户数环比（筹码集中度）
   4. 箱体上沿试盘≥3次 —— 日K自动识别箱体，统计上沿放量上影线「试盘」次数
 
-数据源（全部公开接口，无需 Key）：
-  日K/现价 ：web.ifzq.gtimg.cn（腾讯）  备用 money.finance.sina.com.cn（新浪）
-  资金流   ：push2his.eastmoney.com daykline（需 ut 参数）  备用新浪资金流
-  股东户数 ：datacenter-web.eastmoney.com
-  热点概念 ：push2.eastmoney.com clist + emweb F10 所属板块
+数据源（全部公开接口，无需 Key；东财 push2 不可用时自动降级）：
+  日K/现价 ：web.ifzq.gtimg.cn（腾讯）  备用 hq.sinajs.cn / money.finance.sina.com.cn
+  资金流   ：push2his.eastmoney.com daykline  备用新浪资金流  再备用 AKShare
+  股东户数 ：datacenter-web.eastmoney.com  备用 AKShare
+  热点概念 ：push2.eastmoney.com clist + emweb F10  备用 AKShare（新浪概念 / 同花顺）
+  全市场名单：东财 clist  备用新浪 sh_a+sz_a（不用 hs_a）  再备用 AKShare 官方名单
+  币圈     ：Binance USDT 永续  失败后粘性回退 Gate.io USDT 永续
 
 用法：
   pip install requests
@@ -28,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import threading
@@ -64,6 +67,7 @@ FUND_INFLOW_REQ = 3     # 近5日主力净流入≥3天
 HOLDER_HIGH = -2.0      # 股东户数环比 ≤ -2% → 高控盘
 HOLDER_MID = 0.5        # ≤ 0.5% → 中控盘，否则偏低
 TURNOVER_CAP = 15.0     # 换手率超 15% 视为分歧大，控盘降级
+SCAN_CACHE_TTL = 3600   # 看板「全市场/币圈扫描」结果缓存秒数；调度任务强制刷新
 
 # --------------------------------------------------------------------------- #
 # HTTP 会话（自动重试）
@@ -88,8 +92,134 @@ def http_json(url: str, timeout: float = 10.0):
     return r.json()
 
 
+# --------------------------------------------------------------------------- #
+# AKShare 可选降级（东财 push2 全挂时仍尽量完成扫描；缺包则静默跳过）
+# --------------------------------------------------------------------------- #
+# 实际调用与底层站点（刻意避开仍走 push2.eastmoney.com 的接口）：
+#   stock_info_a_code_name        → 上交所/深交所官方 A 股名单（非东财）
+#   stock_sector_spot("概念")     → 新浪概念板块涨跌幅（money.finance.sina.com.cn）
+#   stock_sector_detail           → 新浪概念板块成分股
+#   stock_fund_flow_concept      → 同花顺概念资金流榜（data.10jqka.com.cn，含涨跌幅）
+#   stock_board_concept_cons_ths  → 同花顺概念成分股（q.10jqka.com.cn）
+#   stock_individual_fund_flow   → 东财数据中心个股资金流（data.eastmoney.com，非 push2）
+#   stock_zh_a_gdhs / gdhs_detail_em → 东财 datacenter 股东户数（非 push2）
+# 不用：stock_zh_a_spot_em / stock_board_concept_name_em（底层仍是 push2 clist）
+_hot_members: dict[str, list[str]] = {}   # 代码 → 本轮热点板块名（F10 失败时反查）
+_ak_holder_map: dict | None = None        # 全市场股东户数快照（进程内一次）
+
+
+def _ak_call(func_name: str, *args, **kwargs):
+    """调用 AKShare 函数；未安装、接口仍打到东财失败、或签名变化时返回 None。"""
+    try:
+        import akshare as ak  # type: ignore
+    except Exception:
+        return None
+    fn = getattr(ak, func_name, None)
+    if fn is None:
+        return None
+    try:
+        return fn(*args, **kwargs)
+    except Exception:
+        return None
+
+
+def _df_records(df) -> list[dict]:
+    if df is None:
+        return []
+    try:
+        if getattr(df, "empty", True):
+            return []
+        return df.to_dict(orient="records")
+    except Exception:
+        return []
+
+
+def _pick(row: dict, *keys):
+    for k in keys:
+        if k in row and row[k] is not None:
+            v = row[k]
+            try:
+                if v != v:  # NaN
+                    continue
+            except Exception:
+                pass
+            if v == "":
+                continue
+            return v
+    return None
+
+
+def _to_float(v, default: float = 0.0) -> float:
+    try:
+        if v is None or v == "":
+            return default
+        s = str(v).strip().replace("%", "").replace(",", "")
+        if not s:
+            return default
+        return float(s)
+    except (TypeError, ValueError):
+        return default
+
+
 def now_str() -> str:
     return datetime.now(BJT).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def iso_now() -> str:
+    """北京时间 ISO-8601（带 +08:00），写入扫描结果 updated 字段。"""
+    return datetime.now(BJT).isoformat(timespec="seconds")
+
+
+def parse_updated(payload: dict | None) -> datetime | None:
+    """解析扫描结果时间戳：优先 updated（ISO），否则 as_of（北京时间墙钟）。"""
+    if not payload:
+        return None
+    raw = payload.get("updated") or payload.get("as_of")
+    if not raw:
+        return None
+    s = str(raw).strip()
+    try:
+        if s.endswith("Z"):
+            return datetime.fromisoformat(s[:-1] + "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=BJT)
+        return dt
+    except ValueError:
+        pass
+    try:
+        return datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=BJT)
+    except ValueError:
+        return None
+
+
+def cache_age_sec(payload: dict | None) -> float | None:
+    dt = parse_updated(payload)
+    if dt is None:
+        return None
+    return max(0.0, (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds())
+
+
+def is_fresh_scan_cache(payload: dict | None, ttl: int = SCAN_CACHE_TTL) -> bool:
+    """完整扫描结果且年龄 < ttl 秒则视为可复用缓存（进行中的断点文件不算）。"""
+    if not payload:
+        return False
+    if payload.get("done") is False:
+        return False
+    age = cache_age_sec(payload)
+    return age is not None and age < ttl
+
+
+def decorate_scan_payload(payload: dict) -> dict:
+    """保证扫描结果含 ISO updated + items（与 candidates 同内容，兼容看板）。"""
+    payload["as_of"] = payload.get("as_of") or now_str()
+    payload["updated"] = iso_now()
+    rows = payload.get("candidates")
+    if rows is None:
+        rows = payload.get("items") or []
+        payload["candidates"] = rows
+    payload["items"] = list(rows)
+    return payload
 
 
 def is_trading_time() -> bool:
@@ -121,7 +251,7 @@ def secid(code: str) -> str:
 
 
 def fetch_quote(code: str) -> dict:
-    """实时行情：东财 push2 主源，腾讯 qt 兜底（东财限流时自动切换）。"""
+    """实时行情：东财 push2 主源，腾讯 qt 兜底，新浪 hq 再兜底（不用 AKShare spot_em，其底层仍是 push2）。"""
     try:
         url = (
             "https://push2.eastmoney.com/api/qt/stock/get"
@@ -139,17 +269,56 @@ def fetch_quote(code: str) -> dict:
     except Exception:
         pass
     # 腾讯兜底（GBK 文本，~ 分隔）
-    r = HTTP.get(f"https://qt.gtimg.cn/q={tx_symbol(code)}", timeout=8)
-    p = r.content.decode("gbk", errors="ignore").split("~")
-    if len(p) < 40 or not p[3]:
-        raise RuntimeError("quote empty (tencent)")
-    return {
-        "price": float(p[3]),
-        "chg": float(p[32]),
-        "name": p[1],
-        "turnover": float(p[38]),
-        "volume_ratio": float(p[49]),
-    }
+    try:
+        r = HTTP.get(f"https://qt.gtimg.cn/q={tx_symbol(code)}", timeout=8)
+        p = r.content.decode("gbk", errors="ignore").split("~")
+        if len(p) >= 40 and p[3]:
+            return {
+                "price": float(p[3]),
+                "chg": float(p[32]),
+                "name": p[1],
+                "turnover": float(p[38]),
+                "volume_ratio": float(p[49]),
+            }
+    except Exception:
+        pass
+    q = _quote_sina(code)
+    if q:
+        return q
+    raise RuntimeError("quote empty (em/tencent/sina)")
+
+
+def _quote_sina(code: str) -> dict | None:
+    """新浪 hq.sinajs.cn 单票快照（非 push2）。"""
+    try:
+        r = HTTP.get(
+            f"https://hq.sinajs.cn/list={tx_symbol(code)}",
+            timeout=8,
+            headers={**UA, "Referer": "https://finance.sina.com.cn"},
+        )
+        text = r.content.decode("gbk", errors="ignore")
+        if "=" not in text or '"' not in text:
+            return None
+        inner = text.split('"', 1)[1].rsplit('"', 1)[0]
+        p = inner.split(",")
+        if len(p) < 4 or not p[3]:
+            return None
+        price = float(p[3])
+        prev = float(p[2] or 0)
+        if price <= 0 and prev > 0:
+            price = prev
+        if price <= 0:
+            return None
+        chg = ((price - prev) / prev * 100) if prev else 0.0
+        return {
+            "price": price,
+            "chg": chg,
+            "name": p[0],
+            "turnover": 0.0,
+            "volume_ratio": 0.0,
+        }
+    except Exception:
+        return None
 
 
 def fetch_kline(code: str, lmt: int = 160) -> list[dict]:
@@ -252,6 +421,29 @@ def fetch_fund_flow(code: str, days: int = FUND_DAYS + 6) -> list[dict]:
             return out[-days:]
     except Exception:
         pass
+    ak_flow = _fund_flow_akshare(code, days)
+    if ak_flow:
+        return ak_flow
+    return []
+
+
+def _fund_flow_akshare(code: str, days: int) -> list[dict]:
+    """
+    AKShare 个股资金流兜底。
+    stock_individual_fund_flow → 东财 data.eastmoney.com 资金流向（非 push2）。
+    若该调用仍打到东财并失败，返回空列表，评分走「无数据」而非中止扫描。
+    """
+    mkt = "SH" if code.startswith(("6", "9", "5")) else ("BJ" if code.startswith(("4", "8")) else "SZ")
+    df = _ak_call("stock_individual_fund_flow", stock=code, market=mkt.lower())
+    out = []
+    for row in _df_records(df):
+        date = str(_pick(row, "日期", "date") or "")[:10]
+        main = _to_float(_pick(row, "主力净流入-净额", "主力净流入", "main"))
+        if date:
+            out.append({"date": date, "main": main})
+    out.sort(key=lambda x: x["date"])
+    if _flow_fresh(out):
+        return out[-days:]
     return []
 
 
@@ -265,7 +457,19 @@ JUNK_BOARD = re.compile(
 
 
 def fetch_concept_boards() -> list[dict]:
-    """拉取东方财富概念板块全表（按当日涨幅排序）。失败返回空列表。"""
+    """拉取概念板块全表（按当日涨幅排序）。东财失败则 AKShare 新浪/同花顺降级。"""
+    boards = _concept_boards_em()
+    if boards:
+        return boards
+    boards = _concept_boards_akshare()
+    if boards:
+        _ak_fill_hot_members(boards)
+        return boards
+    return []
+
+
+def _concept_boards_em() -> list[dict]:
+    """东财 push2 clist 概念板块。失败返回空列表。"""
     try:
         url = (
             "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=80&po=1&np=1&fltt=2&invt=2"
@@ -291,6 +495,70 @@ def fetch_concept_boards() -> list[dict]:
         return boards
     except Exception:
         return []
+
+
+def _concept_boards_akshare() -> list[dict]:
+    """
+    概念板块 AKShare 兜底（不用 stock_board_concept_name_em，其底层仍是 push2）。
+    优先 stock_sector_spot('概念') → 新浪；再试 stock_fund_flow_concept('即时') → 同花顺。
+    """
+    boards: list[dict] = []
+    rows = _df_records(_ak_call("stock_sector_spot", indicator="概念"))
+    if not rows:
+        rows = _df_records(_ak_call("stock_sector_spot", "概念"))
+    if not rows:
+        rows = _df_records(_ak_call("stock_sector_spot", indicator="concept"))
+    for i, row in enumerate(rows):
+        name = str(_pick(row, "板块", "name", "行业") or "").strip()
+        if not name or JUNK_BOARD.search(name):
+            continue
+        chg = _to_float(_pick(row, "涨跌幅", "行业-涨跌幅", "chg1"))
+        n = _to_float(_pick(row, "公司家数", "up"), 0)
+        label = str(_pick(row, "label", "代码") or "")
+        boards.append({
+            "code": label or f"sina-{i}",
+            "name": name,
+            "chg1": chg, "chg5": 0,
+            "main": 0, "up": n, "down": 0,
+            "label": label,
+        })
+    if not boards:
+        for i, row in enumerate(_df_records(_ak_call("stock_fund_flow_concept", symbol="即时"))):
+            name = str(_pick(row, "行业", "板块名称", "板块") or "").strip()
+            if not name or JUNK_BOARD.search(name):
+                continue
+            chg = _to_float(_pick(row, "行业-涨跌幅", "涨跌幅", "阶段涨跌幅"))
+            n = _to_float(_pick(row, "公司家数"), 0)
+            boards.append({
+                "code": f"ths-{i}", "name": name,
+                "chg1": chg, "chg5": 0, "main": 0,
+                "up": n, "down": 0,
+            })
+    boards.sort(key=lambda b: b["chg1"], reverse=True)
+    return boards
+
+
+def _ak_fill_hot_members(boards: list[dict]) -> None:
+    """用热点板块成分股建立 代码→板块名 反查表，供 F10 失败时匹配题材。"""
+    global _hot_members
+    mapping: dict[str, list[str]] = {}
+    for b in boards[:HOT_TOP_N]:
+        name = b.get("name") or ""
+        label = b.get("label") or ""
+        recs = []
+        if label:
+            recs = _df_records(_ak_call("stock_sector_detail", sector=label))
+        if not recs and name:
+            recs = _df_records(_ak_call("stock_board_concept_cons_ths", symbol=name))
+        for row in recs:
+            raw = str(_pick(row, "代码", "code", "股票代码") or "")
+            code = "".join(ch for ch in raw if ch.isdigit())[-6:]
+            if len(code) != 6:
+                continue
+            mapping.setdefault(code, [])
+            if name and name not in mapping[code]:
+                mapping[code].append(name)
+    _hot_members = mapping
 
 
 def fetch_hot_topics(topn: int = HOT_TOP_N) -> tuple[list[dict], set[str]]:
@@ -321,38 +589,81 @@ def _match_hot(concepts: list[str], hot_names: set[str]) -> list[str]:
 
 
 def fetch_concepts(code: str) -> list[str]:
-    """个股所属板块/概念（东财 F10 核心题材），用于热点匹配。"""
-    mkt = "SH" if code.startswith(("6", "9", "5")) else ("BJ" if code.startswith(("4", "8")) else "SZ")
-    d = http_json(
-        f"https://emweb.securities.eastmoney.com/PC_HSF10/CoreConception/PageAjax?code={mkt}{code}",
-        timeout=12,
-    )
-    names = []
-    for x in d.get("ssbk") or []:
-        n = str(x.get("BOARD_NAME") or "").strip()
-        if n:
-            names.append(n)
-    return names
+    """个股所属板块/概念。主源东财 F10；失败则用本轮热点成分股反查（AKShare 新浪/同花顺）。"""
+    try:
+        mkt = "SH" if code.startswith(("6", "9", "5")) else ("BJ" if code.startswith(("4", "8")) else "SZ")
+        d = http_json(
+            f"https://emweb.securities.eastmoney.com/PC_HSF10/CoreConception/PageAjax?code={mkt}{code}",
+            timeout=12,
+        )
+        names = []
+        for x in d.get("ssbk") or []:
+            n = str(x.get("BOARD_NAME") or "").strip()
+            if n:
+                names.append(n)
+        if names:
+            return names
+    except Exception:
+        pass
+    return list(_hot_members.get(code, []))
 
 
 def fetch_holder(code: str) -> dict | None:
     """股东户数（最近两期环比 %）。数据按财报期披露，作为筹码集中度代理。"""
-    url = (
-        "https://datacenter-web.eastmoney.com/api/data/v1/get?"
-        "reportName=RPT_HOLDERNUM_DET&columns=SECURITY_CODE,END_DATE,HOLDER_NUM,"
-        "PRE_HOLDER_NUM,HOLDER_NUM_RATIO,AVG_HOLD_NUM&"
-        f"filter=(SECURITY_CODE%3D%22{code}%22)&pageNumber=1&pageSize=2&"
-        "sortTypes=-1&sortColumns=END_DATE"
-    )
-    d = (http_json(url) or {}).get("result") or {}
-    rows = d.get("data") or []
-    if not rows:
+    try:
+        url = (
+            "https://datacenter-web.eastmoney.com/api/data/v1/get?"
+            "reportName=RPT_HOLDERNUM_DET&columns=SECURITY_CODE,END_DATE,HOLDER_NUM,"
+            "PRE_HOLDER_NUM,HOLDER_NUM_RATIO,AVG_HOLD_NUM&"
+            f"filter=(SECURITY_CODE%3D%22{code}%22)&pageNumber=1&pageSize=2&"
+            "sortTypes=-1&sortColumns=END_DATE"
+        )
+        d = (http_json(url) or {}).get("result") or {}
+        rows = d.get("data") or []
+        if rows:
+            return {
+                "end_date": str(rows[0].get("END_DATE", ""))[:10],
+                "ratio": (rows[0].get("HOLDER_NUM_RATIO") or 0),  # 环比 %
+                "holder_num": rows[0].get("HOLDER_NUM") or 0,
+                "avg_hold": rows[0].get("AVG_HOLD_NUM") or 0,
+            }
+    except Exception:
+        pass
+    return _holder_akshare(code)
+
+
+def _holder_akshare(code: str) -> dict | None:
+    """
+    AKShare 股东户数兜底。
+    stock_zh_a_gdhs('最新') → 东财 datacenter 全市场快照（非 push2，进程内缓存一次）；
+    再试 stock_zh_a_gdhs_detail_em(symbol) 个股明细。失败则返回 None，控盘按中性给分。
+    """
+    global _ak_holder_map
+    if _ak_holder_map is None:
+        _ak_holder_map = {}
+        df = _ak_call("stock_zh_a_gdhs", symbol="最新")
+        for row in _df_records(df):
+            raw = str(_pick(row, "代码", "SECURITY_CODE", "股票代码") or "")
+            c = "".join(ch for ch in raw if ch.isdigit())[-6:]
+            if len(c) != 6:
+                continue
+            _ak_holder_map[c] = {
+                "end_date": str(_pick(row, "统计截止日", "END_DATE", "截止日期") or now_str()[:10])[:10],
+                "ratio": _to_float(_pick(row, "股东户数-增减比例", "HOLDER_NUM_RATIO", "增减比例")),
+                "holder_num": _to_float(_pick(row, "股东户数", "HOLDER_NUM", "股东户数-本次")),
+                "avg_hold": _to_float(_pick(row, "户均持股数", "AVG_HOLD_NUM", "平均持股")),
+            }
+    if code in _ak_holder_map:
+        return _ak_holder_map[code]
+    recs = _df_records(_ak_call("stock_zh_a_gdhs_detail_em", symbol=code))
+    if not recs:
         return None
+    row = recs[0]
     return {
-        "end_date": str(rows[0].get("END_DATE", ""))[:10],
-        "ratio": (rows[0].get("HOLDER_NUM_RATIO") or 0),  # 环比 %
-        "holder_num": rows[0].get("HOLDER_NUM") or 0,
-        "avg_hold": rows[0].get("AVG_HOLD_NUM") or 0,
+        "end_date": str(_pick(row, "股东户数统计-截止日期", "END_DATE", "截止日期") or now_str()[:10])[:10],
+        "ratio": _to_float(_pick(row, "股东户数-增减比例", "HOLDER_NUM_RATIO", "增减比例")),
+        "holder_num": _to_float(_pick(row, "股东户数-本次", "HOLDER_NUM")),
+        "avg_hold": _to_float(_pick(row, "户均持股-本次", "AVG_HOLD_NUM")),
     }
 
 
@@ -670,7 +981,7 @@ def run_scan(network: bool = True, progress=None) -> list[dict]:
         time.sleep(0.12)
 
     rows.sort(key=lambda r: (r.get("score") or 0, r.get("chg") or 0), reverse=True)
-    payload = {
+    payload = decorate_scan_payload({
         "as_of": now_str(),
         "strategy": "箱体突破战法",
         "scope": "pool",
@@ -678,7 +989,7 @@ def run_scan(network: bool = True, progress=None) -> list[dict]:
         "hot_topics": [{"code": b["code"], "name": b["name"],
                         "chg1": b["chg1"], "chg5": b["chg5"]} for b in hot_topics],
         "candidates": rows,
-    }
+    })
     DATA.mkdir(parents=True, exist_ok=True)
     WATCH_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return rows
@@ -718,7 +1029,7 @@ def _mkt_cache_save() -> None:
 
 
 def fetch_universe(force: bool = False) -> list[dict]:
-    """沪深全部 A 股列表，按日缓存。主源东财 clist（含量比），兜底新浪（无量比）。"""
+    """沪深全部 A 股列表，按日缓存。主源东财 clist（含量比），兜底新浪 sh_a+sz_a，再兜底 AKShare。"""
     today = datetime.now(BJT).strftime("%Y-%m-%d")
     if not force and UNIVERSE_FILE.exists():
         try:
@@ -727,9 +1038,9 @@ def fetch_universe(force: bool = False) -> list[dict]:
                 return d["stocks"]
         except Exception:
             pass
-    stocks = _universe_em() or _universe_sina()
+    stocks = _universe_em() or _universe_sina() or _universe_akshare()
     if not stocks:
-        raise RuntimeError("股票清单获取失败（东财 clist 与新浪均不可用）")
+        raise RuntimeError("股票清单获取失败（东财 clist / 新浪 sh_a+sz_a / AKShare 均不可用）")
     DATA.mkdir(parents=True, exist_ok=True)
     UNIVERSE_FILE.write_text(
         json.dumps({"as_of": today, "total": len(stocks), "stocks": stocks},
@@ -790,52 +1101,98 @@ def _universe_em() -> list[dict] | None:
 
 
 def _universe_sina() -> list[dict] | None:
-    """新浪沪深A股分页拉取（无量比字段，vr=0）。失败返回 None。"""
+    """
+    新浪沪深 A 股分页拉取（无量比字段，vr=0）。
+    CN VPS 上 node=hs_a 经常不全/失败，改为 sh_a + sz_a 分市场拉取。
+    价格：成交价 trade>0 用 trade，否则用结算价 settlement（收盘后 trade 常为 0）。
+    """
+    try:
+        stocks, seen = [], set()
+        for node in ("sh_a", "sz_a"):
+            try:
+                for s in _universe_sina_node(node):
+                    if s["code"] in seen:
+                        continue
+                    seen.add(s["code"])
+                    stocks.append(s)
+            except Exception:
+                continue
+        return stocks if len(stocks) > 3000 else None
+    except Exception:
+        return None
+
+
+def _universe_sina_node(node: str) -> list[dict]:
     def _f(v):
         try:
             return float(v)
         except (TypeError, ValueError):
             return 0.0
 
-    try:
-        stocks, page_no = [], 1
-        while True:
-            d = http_json(
-                "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
-                f"Market_Center.getHQNodeData?page={page_no}&num=100&sort=symbol&asc=1"
-                "&node=hs_a&symbol=&_s_r_a=page", timeout=15,
-            )
-            if not d:
-                break
-            for b in d:
-                sym = str(b.get("symbol") or "")
-                if not sym.startswith(("sh", "sz")):
-                    continue                       # 排除北交所等，仅沪深两市
-                if sym.startswith(("sh9", "sz2")):
-                    continue                       # 排除 B 股
-                name = str(b.get("name") or "").strip()
-                px = _f(b.get("trade"))
-                if not name or px <= 0:
-                    continue
-                stocks.append({
-                    "code": str(b.get("code") or sym[2:])[-6:],
-                    "name": name,
-                    "price": px,
-                    "chg": _f(b.get("changepercent")),
-                    "turnover": _f(b.get("turnoverratio")),
-                    "vr": 0.0,
-                    "amount": _f(b.get("amount")),
-                    "mv": _f(b.get("mktcap")),
-                })
-            if len(d) < 100:
-                break
-            page_no += 1
-            if page_no > 80:
-                break
-            time.sleep(0.1)
-        return stocks if len(stocks) > 3000 else None
-    except Exception:
-        return None
+    stocks, page_no = [], 1
+    while True:
+        d = http_json(
+            "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+            f"Market_Center.getHQNodeData?page={page_no}&num=100&sort=symbol&asc=1"
+            f"&node={node}&symbol=&_s_r_a=page", timeout=15,
+        )
+        if not d:
+            break
+        for b in d:
+            sym = str(b.get("symbol") or "")
+            if not sym.startswith(("sh", "sz")):
+                continue                       # 排除北交所等，仅沪深两市
+            if sym.startswith(("sh9", "sz2")):
+                continue                       # 排除 B 股
+            name = str(b.get("name") or "").strip()
+            px = _f(b.get("trade"))
+            if px <= 0:
+                px = _f(b.get("settlement"))
+            if not name or px <= 0:
+                continue
+            stocks.append({
+                "code": str(b.get("code") or sym[2:])[-6:],
+                "name": name,
+                "price": px,
+                "chg": _f(b.get("changepercent")),
+                "turnover": _f(b.get("turnoverratio")),
+                "vr": 0.0,
+                "amount": _f(b.get("amount")),
+                "mv": _f(b.get("mktcap")),
+            })
+        if len(d) < 100:
+            break
+        page_no += 1
+        if page_no > 80:
+            break
+        time.sleep(0.1)
+    return stocks
+
+
+def _universe_akshare() -> list[dict] | None:
+    """
+    AKShare 股票清单兜底。
+    stock_info_a_code_name → 上交所/深交所官方名单（不走 push2；无实时价，深度计算时再补行情）。
+    不用 stock_zh_a_spot_em（底层仍是东财 push2 clist）。
+    """
+    recs = _df_records(_ak_call("stock_info_a_code_name"))
+    stocks = []
+    for row in recs:
+        raw = str(_pick(row, "code", "证券代码", "代码") or "")
+        code = "".join(ch for ch in raw if ch.isdigit())[-6:]
+        name = str(_pick(row, "name", "证券简称", "名称") or "").strip()
+        if len(code) != 6 or not name:
+            continue
+        if code.startswith(("9", "2")):
+            continue                       # 排除 B 股
+        if code.startswith(("4", "8")):
+            continue                       # 排除北交所，与新浪口径一致
+        stocks.append({
+            "code": code, "name": name,
+            "price": 0.0, "chg": 0.0, "turnover": 0.0,
+            "vr": 0.0, "amount": 0.0, "mv": 0.0,
+        })
+    return stocks if len(stocks) > 3000 else None
 
 
 def screen_universe(stocks: list[dict], top: int, pool_codes: set[str]) -> list[dict]:
@@ -904,22 +1261,35 @@ def _cached_holder(code: str) -> dict | None:
 def analyze_market(s: dict, hot_names: set[str]) -> dict | None:
     """对粗筛候选做全量四条件计算；数据不足返回 None（不占位）。"""
     try:
-        bars = fetch_kline(s["code"])
+        code = s["code"]
+        price, chg, turnover, vr = s.get("price") or 0, s.get("chg") or 0, s.get("turnover") or 0, s.get("vr") or 0
+        if price <= 0:
+            try:
+                q = fetch_quote(code)
+                price = q["price"]
+                chg = q["chg"]
+                turnover = q.get("turnover") or turnover
+                vr = max(vr, q.get("volume_ratio") or 0)
+            except Exception:
+                pass
+        bars = fetch_kline(code)
         if len(bars) < 40:
             return None
-        ffs = fetch_fund_flow(s["code"])
-        holder = _cached_holder(s["code"])
-        concepts = _cached_concepts(s["code"])
+        if price <= 0:
+            price = bars[-1]["close"]
+        ffs = fetch_fund_flow(code)
+        holder = _cached_holder(code)
+        concepts = _cached_concepts(code)
         hot_boards = _match_hot(concepts, hot_names)
         theme_ok = bool(hot_boards)
         vol = compute_volume(bars)
         box = compute_box(bars)
         fund = compute_fund(ffs)
-        ctrl = compute_control(s["turnover"], holder)
+        ctrl = compute_control(turnover, holder)
         row = {
-            "code": s["code"], "name": s["name"],
-            "price": s["price"], "chg": s["chg"], "turnover": s["turnover"],
-            "volume_ratio": max(vol["volume_ratio"], s["vr"]),
+            "code": code, "name": s.get("name") or code,
+            "price": price, "chg": chg, "turnover": turnover,
+            "volume_ratio": max(vol["volume_ratio"], vr),
             "volume_ratio_raw": vol["volume_ratio"],
             "volume_days": vol["volume_days"],
             "box_low": box["box_low"] if box else None,
@@ -948,7 +1318,7 @@ def analyze_market(s: dict, hot_names: set[str]) -> dict | None:
 
 def _save_market(rows: list[dict], stocks: list[dict], hot_topics: list[dict],
                  done: int, total: int, final: bool) -> None:
-    payload = {
+    payload = decorate_scan_payload({
         "as_of": now_str(),
         "strategy": "箱体突破战法",
         "scope": "market",
@@ -960,20 +1330,21 @@ def _save_market(rows: list[dict], stocks: list[dict], hot_topics: list[dict],
         "hot_topics": [{"code": b["code"], "name": b["name"],
                         "chg1": b["chg1"], "chg5": b["chg5"]} for b in hot_topics],
         "candidates": rows,
-    }
+    })
     DATA.mkdir(parents=True, exist_ok=True)
     WATCH_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def run_market_scan(full: bool = True, top: int = MARKET_TOP,
-                    workers: int = MARKET_WORKERS, progress=None) -> list[dict]:
+                    workers: int = MARKET_WORKERS, progress=None,
+                    force_universe: bool = False) -> list[dict]:
     """
     全市场扫描。full=True：沪深全部 A 股逐一深度计算（无粗筛）；
     full=False（快扫）：量比粗筛 TOP N 后深度计算。
     """
     if progress:
         progress("拉取沪深 A 股全量清单（首次较慢，此后按日缓存）…")
-    stocks = fetch_universe()
+    stocks = fetch_universe(force=force_universe)
     pool_codes = {p["code"] for p in load_pool()}
     if full:
         picked = list(stocks)
@@ -1025,18 +1396,54 @@ def run_market_scan(full: bool = True, top: int = MARKET_TOP,
 
 
 # --------------------------------------------------------------------------- #
-# 加密货币（Binance USDT 永续期货）
+# 加密货币（Binance USDT 永续为主，失败后粘性回退 Gate.io USDT 永续）
 # --------------------------------------------------------------------------- #
 CRYPTO_FILE = DATA / "crypto.json"
 BINANCE_FUTURES = "https://fapi.binance.com"
+GATE_FUTURES = "https://api.gateio.ws/api/v4/futures/usdt"
+_crypto_backend = "binance"  # 本轮扫描内粘性：Binance 一旦失败则整轮改走 Gate
+
+
+def reset_crypto_backend() -> None:
+    global _crypto_backend
+    _crypto_backend = "binance"
+
+
+def norm_crypto_symbol(sym: str) -> str:
+    """Gate `BTC_USDT` / Binance `BTCUSDT` → 统一 `BTCUSDT`。"""
+    return (sym or "").replace("_", "").replace("-", "").upper()
+
+
+def gate_contract(sym: str) -> str:
+    """`BTCUSDT` → Gate 合约名 `BTC_USDT`。"""
+    s = norm_crypto_symbol(sym)
+    if s.endswith("USDT") and len(s) > 4:
+        return f"{s[:-4]}_USDT"
+    return s
+
+
+def _mark_crypto_gate() -> None:
+    global _crypto_backend
+    _crypto_backend = "gate"
 
 
 def fetch_crypto_tickers() -> list[dict]:
-    """Binance USDT 永续全市场 24h 行情，按涨幅 top N 进池子。"""
+    """USDT 永续全市场 24h 行情。Binance 失败则粘性回退 Gate.io。"""
+    if _crypto_backend != "gate":
+        try:
+            rows = _binance_tickers()
+            if rows:
+                return rows
+        except Exception:
+            _mark_crypto_gate()
+    return _gate_tickers()
+
+
+def _binance_tickers() -> list[dict]:
     d = http_json(f"{BINANCE_FUTURES}/fapi/v1/ticker/24hr", timeout=15)
     out = []
     for t in d or []:
-        sym = str(t.get("symbol") or "")
+        sym = norm_crypto_symbol(str(t.get("symbol") or ""))
         if not sym.endswith("USDT"):
             continue
         try:
@@ -1051,7 +1458,36 @@ def fetch_crypto_tickers() -> list[dict]:
             "price": price,
             "chg": chg,
             "quote_volume": float(t.get("quoteVolume") or 0),
-            "volume_ratio": 0.0,  # 由K线计算
+            "volume_ratio": 0.0,
+            "turnover": 0.0,
+        })
+    out.sort(key=lambda x: x["chg"], reverse=True)
+    return out
+
+
+def _gate_tickers() -> list[dict]:
+    d = http_json(f"{GATE_FUTURES}/tickers", timeout=15)
+    out = []
+    for t in d or []:
+        contract = str(t.get("contract") or "")
+        if not contract.endswith("_USDT") and not contract.upper().endswith("USDT"):
+            continue
+        sym = norm_crypto_symbol(contract)
+        if not sym.endswith("USDT"):
+            continue
+        try:
+            chg = float(t.get("change_percentage") or 0)
+            price = float(t.get("last") or 0)
+        except (ValueError, TypeError):
+            continue
+        if price <= 0:
+            continue
+        out.append({
+            "symbol": sym,
+            "price": price,
+            "chg": chg,
+            "quote_volume": _to_float(t.get("volume_24h_quote")),
+            "volume_ratio": 0.0,
             "turnover": 0.0,
         })
     out.sort(key=lambda x: x["chg"], reverse=True)
@@ -1060,9 +1496,22 @@ def fetch_crypto_tickers() -> list[dict]:
 
 def fetch_crypto_kline(symbol: str, limit: int = CRYPTO_LOOKBACK,
                        interval: str = "1d") -> list[dict]:
-    """Binance 永续 K线（日线）。字段 date open close high low vol(币基)。"""
+    """永续日K。Binance 失败后本轮粘性改走 Gate.io。"""
+    if _crypto_backend != "gate":
+        try:
+            bars = _binance_klines(symbol, limit, interval)
+            if bars:
+                return bars
+        except Exception:
+            _mark_crypto_gate()
+            return _gate_klines(symbol, limit, interval)
+    return _gate_klines(symbol, limit, interval)
+
+
+def _binance_klines(symbol: str, limit: int, interval: str) -> list[dict]:
     d = http_json(
-        f"{BINANCE_FUTURES}/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={limit}",
+        f"{BINANCE_FUTURES}/fapi/v1/klines?symbol={norm_crypto_symbol(symbol)}"
+        f"&interval={interval}&limit={limit}",
         timeout=15,
     )
     bars = []
@@ -1072,10 +1521,37 @@ def fetch_crypto_kline(symbol: str, limit: int = CRYPTO_LOOKBACK,
                 "date": datetime.fromtimestamp(k[0] / 1000).strftime("%Y-%m-%d"),
                 "open": float(k[1]), "close": float(k[4]),
                 "high": float(k[2]), "low": float(k[3]),
-                "vol": float(k[5]),   # 成交量（币基）
+                "vol": float(k[5]),
             })
         except (ValueError, IndexError, TypeError):
             continue
+    return bars
+
+
+def _gate_klines(symbol: str, limit: int, interval: str) -> list[dict]:
+    d = http_json(
+        f"{GATE_FUTURES}/candlesticks?contract={gate_contract(symbol)}"
+        f"&interval={interval}&limit={limit}",
+        timeout=15,
+    )
+    bars = []
+    for k in d or []:
+        try:
+            ts = k.get("t") if isinstance(k, dict) else k[0]
+            o = k.get("o") if isinstance(k, dict) else k[1]
+            c = k.get("c") if isinstance(k, dict) else k[4]
+            h = k.get("h") if isinstance(k, dict) else k[2]
+            low = k.get("l") if isinstance(k, dict) else k[3]
+            v = k.get("v") if isinstance(k, dict) else k[5]
+            bars.append({
+                "date": datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d"),
+                "open": float(o), "close": float(c),
+                "high": float(h), "low": float(low),
+                "vol": float(v or 0),
+            })
+        except (ValueError, IndexError, TypeError, AttributeError, KeyError):
+            continue
+    bars.sort(key=lambda b: b["date"])
     return bars
 
 
@@ -1111,12 +1587,14 @@ def analyze_crypto(sym: str, price: float, chg: float,
 def run_crypto_scan(top: int = CRYPTO_TOP_N, workers: int = 8,
                     progress=None) -> list[dict]:
     """币圈扫描：24h 涨幅 top N 进池 → 复用箱体引擎打分。"""
+    reset_crypto_backend()
     if progress:
-        progress(f"拉取 Binance USDT 永续 24h 行情…")
+        progress("拉取 USDT 永续 24h 行情（Binance，失败则 Gate.io）…")
     tickers = fetch_crypto_tickers()
+    src = "Gate.io" if _crypto_backend == "gate" else "Binance"
     pool = tickers[:top]
     if progress:
-        progress(f"24h 涨幅前 {len(pool)} 进入池子，开始箱体扫描（{workers} 线程）…")
+        progress(f"{src} 24h 涨幅前 {len(pool)} 进入池子，开始箱体扫描（{workers} 线程）…")
 
     rows, done = [], 0
     lock = threading.Lock()
@@ -1143,7 +1621,7 @@ def run_crypto_scan(top: int = CRYPTO_TOP_N, workers: int = 8,
                 pass
 
     rows.sort(key=lambda r: (r.get("score") or 0, r.get("chg") or 0), reverse=True)
-    payload = {
+    payload = decorate_scan_payload({
         "as_of": now_str(),
         "strategy": "箱体突破战法",
         "scope": "crypto",
@@ -1154,7 +1632,8 @@ def run_crypto_scan(top: int = CRYPTO_TOP_N, workers: int = 8,
         "done": True,
         "hot_topics": [],
         "candidates": rows,
-    }
+        "source": "gate" if _crypto_backend == "gate" else "binance",
+    })
     DATA.mkdir(parents=True, exist_ok=True)
     CRYPTO_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     if progress:
@@ -1298,6 +1777,7 @@ def main() -> int:
         payload = dict(raw)
         payload["as_of"] = now_str()
         payload["candidates"] = rows
+        decorate_scan_payload(payload)
         WATCH_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     elif args.crypto:
         rows = run_crypto_scan(top=CRYPTO_TOP_N, workers=args.workers, progress=prog)

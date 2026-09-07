@@ -101,6 +101,9 @@
     .act:disabled { opacity: .5; cursor: not-allowed; }
     .act.go { background: var(--orange); color: #fff; }
     .act.go:hover { filter: brightness(1.08); }
+    .act.ghost { background: transparent; border: 1px solid var(--card-border); color: var(--ink-dim); font-size: 12px; letter-spacing: .04em; padding: 8px 14px; }
+    .act.ghost:hover { color: var(--ink); background: var(--hover); }
+    .cache-hint { font-family: var(--mono); font-size: 11px; color: var(--ink-faint); }
 
     /* ================= 内容区 ================= */
     .card { background: var(--card); border: 1px solid var(--card-border); border-radius: var(--r); padding: 14px 16px; }
@@ -171,11 +174,13 @@
       <button class="tab" data-market="crypto" type="button">加密货币</button>
     </div>
     <button class="act go" id="btnScan" type="button">全市场扫描</button>
+    <button class="act ghost" id="btnForceScan" type="button" title="忽略1小时缓存，重新全量扫描" style="display:none">强制重扫</button>
   </div>
 
   <section class="card">
     <div class="sec-head">
       <h3 id="cardsTitle">今日达标 <span class="plan-count" id="poolCount"></span></h3>
+      <span class="cache-hint" id="cacheHint"></span>
       <span class="mode-tag" id="hotTopics" style="display:none"></span>
     </div>
     <div class="cards" id="cards"></div>
@@ -210,23 +215,50 @@ async function jfetch(path, opts) {
   return r.json();
 }
 async function loadAll() {
-  const [w, c, st, cfg, hot] = await Promise.all([
+  const [w, c, st, cfg] = await Promise.all([
     jfetch("api/watchlist"),
     jfetch("api/crypto").catch(() => null),
     jfetch("api/status").catch(() => null),
     jfetch("api/config").catch(() => null),
-    jfetch("api/hot").catch(() => ({ hot_topics: [] })),
   ]);
-  S.watch = w; S.crypto = c; S.status = st; S.cfg = cfg; S.hot = hot.hot_topics || []; S.loaded = true;
+  S.watch = w; S.crypto = c; S.status = st; S.cfg = cfg; S.loaded = true;
+  S.hot = (w && w.hot_topics) || [];
   renderAll();
+  jfetch("api/hot").then(hot => {
+    if ((hot.hot_topics || []).length) {
+      S.hot = hot.hot_topics;
+      if (S.market === "stock") renderAll();
+    }
+  }).catch(() => {});
 }
 async function refresh() { try { await loadAll(); } catch (e) {} }
 
 /* =============================== 渲染 =============================== */
+function parseStamp(s) {
+  if (!s) return null;
+  const iso = Date.parse(s);
+  if (!isNaN(iso)) return new Date(iso);
+  const bj = Date.parse(String(s).replace(" ", "T") + "+08:00");
+  return isNaN(bj) ? null : new Date(bj);
+}
+function hhmm(d) {
+  return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+}
+function cacheHintText(data) {
+  if (!data || data.done === false) return "";
+  const ts = data.updated || data.as_of;
+  const d = parseStamp(ts);
+  if (!d) return "";
+  const age = (Date.now() - d.getTime()) / 1000;
+  const when = hhmm(d);
+  if (age < 3600) return `缓存 · 更新于 ${when} · 1小时内不重复全量扫描`;
+  return `缓存 · 更新于 ${when} · 可强制重扫`;
+}
+
 function renderAll() {
   const isCrypto = S.market === "crypto";
   const data = isCrypto ? (S.crypto || {}) : (S.watch || {});
-  const rows = data.candidates || [];
+  const rows = data.candidates || data.items || [];
   const hits = rows.filter(r => r.qualified);
   const scope = data.scope;
 
@@ -243,6 +275,10 @@ function renderAll() {
   } else {
     $("cardsTitle").innerHTML = `今日达标 <span class="plan-count" id="poolCount">${S.loaded ? hits.length : ""}</span>`;
   }
+  const hint = $("cacheHint");
+  hint.textContent = S.loaded ? cacheHintText(data) : "";
+  const forceBtn = $("btnForceScan");
+  if (forceBtn) forceBtn.style.display = (S.loaded && (rows.length || data.updated || data.as_of)) ? "" : "none";
   // A股：展示当前热门板块（可点击筛选）；接口限流则诚实提示
   const hotEl = $("hotTopics");
   if (!isCrypto) {
@@ -296,7 +332,7 @@ function renderCards(rows) {
   }
   if (!shown.length) {
     box.innerHTML = `<div class="empty"><div class="big">NO SIGNAL</div><p>${S.selBoard ? `该板块暂无股票` : "暂无数据"}</p>
-      <button class="act go" type="button" onclick="doScan()">${isCrypto ? "币圈扫描" : "全市场扫描"}</button></div>`;
+      <button class="act go" type="button" onclick="doScan(false)">${isCrypto ? "币圈扫描" : "全市场扫描"}</button></div>`;
     return;
   }
   box.innerHTML = shown.map((r, i) => cardHTML(r, i)).join("");
@@ -449,24 +485,37 @@ async function refreshQuotes() {
 
 /* =============================== 扫描 / 配置 =============================== */
 let scanning = false;
-async function doScan() {
+function scanBtnLabel() {
+  return S.market === "crypto" ? "币圈扫描" : "全市场扫描";
+}
+async function doScan(force) {
   if (scanning) return;
   const mode = S.market === "crypto" ? "crypto" : "market";
-  scanning = true; $("btnScan").disabled = true; $("btnScan").textContent = "扫描中…";
+  scanning = true; $("btnScan").disabled = true; $("btnForceScan").disabled = true;
+  $("btnScan").textContent = force ? "强制重扫中…" : "扫描中…";
   try {
-    const r = await jfetch("api/scan", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode }) });
+    const r = await jfetch("api/scan" + (force ? "?force=1" : ""), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode, force: !!force })
+    });
     if (r.status === "running") toast("扫描已在进行中");
-    for (let i = 0; i < 200; i++) {
-      await new Promise(res => setTimeout(res, 3000));
-      const st = await jfetch("api/status");
-      S.status = st;
-      if (!st.scanning) { await refresh(); toast("扫描完成"); break; }
+    else if (r.from_cache || r.status === "cached") {
+      if (mode === "crypto") S.crypto = r; else S.watch = r;
+      renderAll();
+      toast("缓存 · 1小时内未重复全量扫描");
+    } else {
+      for (let i = 0; i < 200; i++) {
+        await new Promise(res => setTimeout(res, 3000));
+        const st = await jfetch("api/status");
+        S.status = st;
+        if (!st.scanning) { await refresh(); toast("扫描完成"); break; }
+      }
     }
   } catch (e) {
     toast("扫描失败");
   }
-  scanning = false; $("btnScan").disabled = false; $("btnScan").textContent = S.market === "crypto" ? "币圈扫描" : "全市场扫描";
+  scanning = false; $("btnScan").disabled = false; $("btnForceScan").disabled = false;
+  $("btnScan").textContent = scanBtnLabel();
 }
 
 async function saveCfg() {
@@ -483,7 +532,7 @@ function switchMarket(market) {
   S.market = market;
   S.kbars = {};
   if (market === "crypto") S.selBoard = null;   // 板块筛选仅 A股
-  $("btnScan").textContent = market === "crypto" ? "币圈扫描" : "全市场扫描";
+  $("btnScan").textContent = scanBtnLabel();
   renderAll();
   const data = market === "crypto" ? (S.crypto || {}) : (S.watch || {});
   (data.candidates || []).filter(r => r.qualified).forEach(r => loadChart(r.code));
@@ -506,6 +555,8 @@ function boot() {
     S.selBoard = (S.selBoard === board) ? null : board;
     renderAll();
   });
+  $("btnScan").addEventListener("click", () => doScan(false));
+  $("btnForceScan").addEventListener("click", () => doScan(true));
   $("autoCb").addEventListener("change", () => saveCfg());
   refresh().then(() => refreshQuotes());
   setInterval(refreshQuotes, 3000);

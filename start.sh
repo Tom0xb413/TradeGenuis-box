@@ -9,10 +9,13 @@ if ! command -v python3 >/dev/null 2>&1; then
   echo "❌ 未找到 python3，请先安装 Python 3.9+"; exit 1
 fi
 
-# 1) 依赖检查
+# 1) 依赖检查（akshare 用于东财失败时降级，装不上不阻断启动）
 if ! $PY -c "import requests" >/dev/null 2>&1; then
-  echo "⏳ 安装依赖 requests …"
-  $PY -m pip install -q -r requirements.txt || { echo "❌ 安装失败，请手动执行: pip install requests"; exit 1; }
+  echo "⏳ 安装依赖 …"
+  $PY -m pip install -q -r requirements.txt || { echo "❌ 安装失败，请手动执行: pip install -r requirements.txt"; exit 1; }
+elif ! $PY -c "import akshare" >/dev/null 2>&1; then
+  echo "⏳ 安装 akshare（东财不可用时的降级数据源）…"
+  $PY -m pip install -q -r requirements.txt || echo "⚠️ akshare 安装失败，扫描仍可用新浪/腾讯/Gate 兜底"
 fi
 
 PORT="${PORT:-8808}"
