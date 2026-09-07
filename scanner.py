@@ -7,7 +7,7 @@
   1. 热点题材        —— 东财概念板块榜（5日+当日涨幅 TOP12）实时判定该股是否隶属热点板块
   2. 倍量启动持续≥3日 —— 腾讯前复权日K：成交量 ≥ 前 5 日均量 1.8 倍的连续天数
   3. 主力资金持续流入+高度控盘 —— 东财资金流（近5日主力净流入）+ 股东户数环比（筹码集中度）
-  4. 箱体上沿试盘≥3次 —— 日K自动识别箱体，统计上沿放量上影线「试盘」次数
+  4. 箱体上沿试盘≥3次 —— 日K自动识别箱体（classic / p0 / p1 骨架，见 box_engine.py）
 
 数据源（全部公开接口，无需 Key；东财 push2 不可用时自动降级）：
   日K/现价 ：web.ifzq.gtimg.cn（腾讯）  备用 hq.sinajs.cn / money.finance.sina.com.cn
@@ -43,6 +43,17 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from box_engine import (
+    BOX_MODES,
+    DEFAULT_BOX_MODE,
+    box_row_fields,
+    compute_box,
+    compute_box_classic,
+    compute_box_p0,
+    compute_box_p1,
+    normalize_box_mode,
+)
+
 # --------------------------------------------------------------------------- #
 # 常量 / 配置
 # --------------------------------------------------------------------------- #
@@ -57,11 +68,6 @@ CRYPTO_TOP_N = 30       # 币圈：过去24h涨幅前 N 进入池子
 CRYPTO_LOOKBACK = 200    # 币圈K线根数（日线）
 VOL_MULT = 1.8          # 倍量阈值（对前5日均量）
 VOL_DAYS_REQ = 3        # 连续放量最少天数
-BOX_LOOK = 60           # 箱体窗口（根K）
-BOX_NEAR = 0.985        # 逼近上沿判定系数（high >= box_high*0.985 视为触箱顶）
-BOX_CLOSE = 1.005       # 收盘未有效站上上沿（close <= box_high*1.005 视为试盘未破）
-BOX_SHADOW = 0.30       # 上影线占比阈值
-TEST_VOL = 0.70         # 试盘日量能下限（对箱体窗口均量）
 FUND_DAYS = 5           # 资金流观察天数
 FUND_INFLOW_REQ = 3     # 近5日主力净流入≥3天
 HOLDER_HIGH = -2.0      # 股东户数环比 ≤ -2% → 高控盘
@@ -219,7 +225,18 @@ def decorate_scan_payload(payload: dict) -> dict:
         rows = payload.get("items") or []
         payload["candidates"] = rows
     payload["items"] = list(rows)
+    if "box_mode" not in payload:
+        payload["box_mode"] = load_box_mode()
     return payload
+
+
+def load_box_mode() -> str:
+    """读取 data/config.json 的 box_mode；缺省 classic。扫描路径据此选择识别算法。"""
+    try:
+        cfg = json.loads((DATA / "config.json").read_text(encoding="utf-8"))
+        return normalize_box_mode(cfg.get("box_mode"))
+    except Exception:
+        return DEFAULT_BOX_MODE
 
 
 def is_trading_time() -> bool:
@@ -693,59 +710,6 @@ def compute_volume(bars: list[dict]) -> dict:
     }
 
 
-def compute_box(bars: list[dict]) -> dict | None:
-    """
-    自动识别箱体 + 上沿试盘次数。
-    取最近 BOX_LOOK 根K（若最近15根内发生突破，则窗口截止到突破日），
-    box 为窗口最高/最低；试盘 = 触上沿、收盘未破、放量、上影线明显。
-    """
-    n = len(bars)
-    if n < 40:
-        return None
-    box_end = n
-    for i in range(max(0, n - 15), n):
-        if i >= 40:
-            prev_high = max(b["high"] for b in bars[i - 40:i])
-            if bars[i]["close"] > prev_high * 1.005:
-                box_end = i
-                break
-    start = max(0, box_end - BOX_LOOK)
-    win = bars[start:box_end]
-    if not win:
-        return None
-    high = max(b["high"] for b in win)
-    low = min(b["low"] for b in win)
-    if high <= low:
-        return None
-    vol_avg = sum(b["vol"] for b in win) / len(win) or 1.0
-
-    tests = 0
-    test_dates = []
-    for b in win:
-        h, l, c, o, v = b["high"], b["low"], b["close"], b["open"], b["vol"]
-        if h <= l:
-            continue
-        if h >= high * BOX_NEAR and c <= high * BOX_CLOSE and v >= TEST_VOL * vol_avg:
-            up_shadow = h - max(o, c)
-            if up_shadow > 0 and (up_shadow / (h - l) >= BOX_SHADOW or h >= high * 0.995):
-                tests += 1
-                test_dates.append(b["date"])
-
-    price = bars[-1]["close"]
-    pos = (price - low) / (high - low) * 100 if high > low else 0.0
-    span = (high - low) / low * 100 if low > 0 else 0.0
-    return {
-        "box_low": round(low, 2),
-        "box_high": round(high, 2),
-        "tests": tests,
-        "test_dates": test_dates[-8:],
-        "pos_pct": round(max(0.0, min(100.0, pos)), 1),
-        "span_pct": round(span, 1),
-        "window": f"{win[0]['date']} ~ {win[-1]['date']}",
-        "box_end": box_end,
-    }
-
-
 def compute_fund(ffs: list[dict]) -> dict:
     """近5日主力净流入（万元）、流入天数、状态。"""
     last = ffs[-FUND_DAYS:] if ffs else []
@@ -899,15 +863,16 @@ def load_pool() -> list[dict]:
 
 
 def analyze(code: str, name: str, theme_hint: str,
-            hot_names: set[str]) -> dict:
+            hot_names: set[str], box_mode: str | None = None) -> dict:
     """分析单只股票：拉全量数据 + 四条件计算。"""
+    mode = normalize_box_mode(box_mode or load_box_mode())
     q = fetch_quote(code)
     bars = fetch_kline(code)
     ffs = fetch_fund_flow(code)
     holder = fetch_holder(code)
 
     vol = compute_volume(bars)
-    box = compute_box(bars)
+    box = compute_box(bars, mode=mode)
     fund = compute_fund(ffs)
     ctrl = compute_control(q["turnover"], holder)
 
@@ -930,13 +895,7 @@ def analyze(code: str, name: str, theme_hint: str,
         "volume_ratio": max(vol["volume_ratio"], q["volume_ratio"]),  # 当日量比（已修正的日内量能）
         "volume_ratio_raw": vol["volume_ratio"],
         "volume_days": vol["volume_days"],
-        "box_low": box["box_low"] if box else None,
-        "box_high": box["box_high"] if box else None,
-        "pos_pct": box["pos_pct"] if box else None,
-        "box_span_pct": box["span_pct"] if box else None,
-        "box_window": box["window"] if box else None,
-        "tests": box["tests"] if box else 0,
-        "test_dates": box["test_dates"] if box else [],
+        **box_row_fields(box, mode),
         "fund_5d": fund["fund_5d"],
         "inflow_days": fund["inflow_days"],
         "fund_state": fund["fund_state"],
@@ -957,6 +916,7 @@ def analyze(code: str, name: str, theme_hint: str,
 def run_scan(network: bool = True, progress=None) -> list[dict]:
     """执行扫描，写 data/watchlist.json，返回候选行。"""
     pool = load_pool()
+    box_mode = load_box_mode()
     hot_topics, hot_names = ([], set())
     if network:
         if progress:
@@ -968,13 +928,13 @@ def run_scan(network: bool = True, progress=None) -> list[dict]:
         if progress:
             progress(f"[{i + 1}/{len(pool)}] 分析 {s['code']} {s['name']}")
         try:
-            rows.append(analyze(s["code"], s["name"], s["theme"], hot_names))
+            rows.append(analyze(s["code"], s["name"], s["theme"], hot_names, box_mode=box_mode))
         except Exception as e:
             rows.append(score_row({
                 "code": s["code"], "name": s["name"] or s["code"],
                 "price": None, "chg": None, "theme_hint": s.get("theme", ""),
                 "theme_ok": False, "volume_days": 0, "volume_ratio": 0.0,
-                "box_low": None, "box_high": None, "tests": 0,
+                **box_row_fields(None, box_mode),
                 "fund_state": "无数据", "control": "—", "error": str(e)[:120],
                 "flags": [f"数据错误:{str(e)[:40]}", 0],
             }))
@@ -986,6 +946,7 @@ def run_scan(network: bool = True, progress=None) -> list[dict]:
         "strategy": "箱体突破战法",
         "scope": "pool",
         "pool_size": len(rows),
+        "box_mode": box_mode,
         "hot_topics": [{"code": b["code"], "name": b["name"],
                         "chg1": b["chg1"], "chg5": b["chg5"]} for b in hot_topics],
         "candidates": rows,
@@ -1258,9 +1219,10 @@ def _cached_holder(code: str) -> dict | None:
     return h
 
 
-def analyze_market(s: dict, hot_names: set[str]) -> dict | None:
+def analyze_market(s: dict, hot_names: set[str], box_mode: str | None = None) -> dict | None:
     """对粗筛候选做全量四条件计算；数据不足返回 None（不占位）。"""
     try:
+        mode = normalize_box_mode(box_mode or load_box_mode())
         code = s["code"]
         price, chg, turnover, vr = s.get("price") or 0, s.get("chg") or 0, s.get("turnover") or 0, s.get("vr") or 0
         if price <= 0:
@@ -1283,7 +1245,7 @@ def analyze_market(s: dict, hot_names: set[str]) -> dict | None:
         hot_boards = _match_hot(concepts, hot_names)
         theme_ok = bool(hot_boards)
         vol = compute_volume(bars)
-        box = compute_box(bars)
+        box = compute_box(bars, mode=mode)
         fund = compute_fund(ffs)
         ctrl = compute_control(turnover, holder)
         row = {
@@ -1292,13 +1254,7 @@ def analyze_market(s: dict, hot_names: set[str]) -> dict | None:
             "volume_ratio": max(vol["volume_ratio"], vr),
             "volume_ratio_raw": vol["volume_ratio"],
             "volume_days": vol["volume_days"],
-            "box_low": box["box_low"] if box else None,
-            "box_high": box["box_high"] if box else None,
-            "pos_pct": box["pos_pct"] if box else None,
-            "box_span_pct": box["span_pct"] if box else None,
-            "box_window": box["window"] if box else None,
-            "tests": box["tests"] if box else 0,
-            "test_dates": box["test_dates"] if box else [],
+            **box_row_fields(box, mode),
             "fund_5d": fund["fund_5d"],
             "inflow_days": fund["inflow_days"],
             "fund_state": fund["fund_state"],
@@ -1317,7 +1273,7 @@ def analyze_market(s: dict, hot_names: set[str]) -> dict | None:
 
 
 def _save_market(rows: list[dict], stocks: list[dict], hot_topics: list[dict],
-                 done: int, total: int, final: bool) -> None:
+                 done: int, total: int, final: bool, box_mode: str | None = None) -> None:
     payload = decorate_scan_payload({
         "as_of": now_str(),
         "strategy": "箱体突破战法",
@@ -1327,6 +1283,7 @@ def _save_market(rows: list[dict], stocks: list[dict], hot_topics: list[dict],
         "scored": len(rows),
         "scanned": done,
         "done": final,
+        "box_mode": normalize_box_mode(box_mode or load_box_mode()),
         "hot_topics": [{"code": b["code"], "name": b["name"],
                         "chg1": b["chg1"], "chg5": b["chg5"]} for b in hot_topics],
         "candidates": rows,
@@ -1346,6 +1303,7 @@ def run_market_scan(full: bool = True, top: int = MARKET_TOP,
         progress("拉取沪深 A 股全量清单（首次较慢，此后按日缓存）…")
     stocks = fetch_universe(force=force_universe)
     pool_codes = {p["code"] for p in load_pool()}
+    box_mode = load_box_mode()
     if full:
         picked = list(stocks)
         if progress:
@@ -1357,7 +1315,7 @@ def run_market_scan(full: bool = True, top: int = MARKET_TOP,
 
     hot_topics, hot_names = fetch_hot_topics()
     if progress:
-        progress(f"热点概念 TOP{len(hot_topics)} 已就绪，开始并发深度计算（{workers} 线程）…")
+        progress(f"热点概念 TOP{len(hot_topics)} 已就绪，箱体模式 {box_mode}，开始并发深度计算（{workers} 线程）…")
 
     rows, done = [], 0
     lock = threading.Lock()
@@ -1365,7 +1323,7 @@ def run_market_scan(full: bool = True, top: int = MARKET_TOP,
     def one(s: dict):
         nonlocal done
         try:
-            return analyze_market(s, hot_names)
+            return analyze_market(s, hot_names, box_mode=box_mode)
         finally:
             with lock:
                 done += 1
@@ -1373,7 +1331,8 @@ def run_market_scan(full: bool = True, top: int = MARKET_TOP,
                     progress(f"深度计算 {done}/{len(picked)}，已有效 {len(rows)} 只")
                 if done % 300 == 0:          # 断点保护：每 300 只落盘一次
                     _save_market(sorted(rows, key=lambda r: r.get("score") or 0, reverse=True),
-                                 stocks, hot_topics, done, len(picked), final=False)
+                                 stocks, hot_topics, done, len(picked), final=False,
+                                 box_mode=box_mode)
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = [ex.submit(one, s) for s in picked]
@@ -1387,7 +1346,7 @@ def run_market_scan(full: bool = True, top: int = MARKET_TOP,
 
     rows.sort(key=lambda r: (r.get("score") or 0, r.get("volume_ratio") or 0,
                              r.get("chg") or 0), reverse=True)
-    _save_market(rows, stocks, hot_topics, done, len(picked), final=True)
+    _save_market(rows, stocks, hot_topics, done, len(picked), final=True, box_mode=box_mode)
     skipped = len(picked) - len(rows)
     if progress:
         progress(f"完成：有效评分 {len(rows)} 只（数据不足跳过 {skipped} 只），"
@@ -1556,24 +1515,19 @@ def _gate_klines(symbol: str, limit: int, interval: str) -> list[dict]:
 
 
 def analyze_crypto(sym: str, price: float, chg: float,
-                   bars: list[dict]) -> dict | None:
+                   bars: list[dict], box_mode: str | None = None) -> dict | None:
     """复用同一套箱体/倍量/试盘引擎，币圈无板块、无主力资金/股东户数。"""
     if len(bars) < 40:
         return None
+    mode = normalize_box_mode(box_mode or load_box_mode())
     vol = compute_volume(bars)
-    box = compute_box(bars)
+    box = compute_box(bars, mode=mode)
     row = {
         "code": sym, "name": sym, "market": "crypto",
         "price": price, "chg": chg,
         "turnover": None, "volume_ratio": vol["volume_ratio"],
         "volume_days": vol["volume_days"],
-        "box_low": box["box_low"] if box else None,
-        "box_high": box["box_high"] if box else None,
-        "pos_pct": box["pos_pct"] if box else None,
-        "box_span_pct": box["span_pct"] if box else None,
-        "box_window": box["window"] if box else None,
-        "tests": box["tests"] if box else 0,
-        "test_dates": box["test_dates"] if box else [],
+        **box_row_fields(box, mode),
         # 币圈无资金流/控盘/热点 → 恒空，对应条件按币圈口径折中给分
         "fund_5d": None, "inflow_days": 0, "fund_state": "—",
         "control": "—", "holder_ratio": None, "control_note": "",
@@ -1588,13 +1542,14 @@ def run_crypto_scan(top: int = CRYPTO_TOP_N, workers: int = 8,
                     progress=None) -> list[dict]:
     """币圈扫描：24h 涨幅 top N 进池 → 复用箱体引擎打分。"""
     reset_crypto_backend()
+    box_mode = load_box_mode()
     if progress:
         progress("拉取 USDT 永续 24h 行情（Binance，失败则 Gate.io）…")
     tickers = fetch_crypto_tickers()
     src = "Gate.io" if _crypto_backend == "gate" else "Binance"
     pool = tickers[:top]
     if progress:
-        progress(f"{src} 24h 涨幅前 {len(pool)} 进入池子，开始箱体扫描（{workers} 线程）…")
+        progress(f"{src} 24h 涨幅前 {len(pool)} 进入池子，箱体模式 {box_mode}，开始箱体扫描（{workers} 线程）…")
 
     rows, done = [], 0
     lock = threading.Lock()
@@ -1603,7 +1558,7 @@ def run_crypto_scan(top: int = CRYPTO_TOP_N, workers: int = 8,
         nonlocal done
         try:
             bars = fetch_crypto_kline(sym)
-            return analyze_crypto(sym, price, chg, bars)
+            return analyze_crypto(sym, price, chg, bars, box_mode=box_mode)
         finally:
             with lock:
                 done += 1
@@ -1630,6 +1585,7 @@ def run_crypto_scan(top: int = CRYPTO_TOP_N, workers: int = 8,
         "scored": len(rows),
         "scanned": len(pool),
         "done": True,
+        "box_mode": box_mode,
         "hot_topics": [],
         "candidates": rows,
         "source": "gate" if _crypto_backend == "gate" else "binance",
