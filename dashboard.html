@@ -416,7 +416,10 @@ function renderCfg() {
     t.classList.toggle("on", t.dataset.family === fam);
   });
   const boxWrap = $("boxModeWrap");
-  if (boxWrap) boxWrap.classList.toggle("dimmed", fam === "high_flag");
+  if (boxWrap) {
+    boxWrap.classList.toggle("dimmed", fam === "high_flag");
+    boxWrap.style.display = fam === "high_flag" ? "none" : "";
+  }
   const flagWrap = $("flagFilterWrap");
   if (flagWrap) flagWrap.style.display = fam === "high_flag" ? "" : "none";
   document.querySelectorAll("#flagFilterTabs .tab").forEach(t => {
@@ -459,6 +462,13 @@ function renderCards(rows) {
       if (ab) return ab;
       return (b.pole_gain || 0) - (a.pole_gain || 0);
     });
+    const titleBits = {
+      handle: "旗形整理",
+      secondary_buy: "二次买点",
+    };
+    const title = titleBits[S.flagFilter] || "高位旗形";
+    $("cardsTitle").innerHTML = `${title} <span class="plan-count" id="poolCount">${shown.length}</span>`;
+    $("hpHit").textContent = shown.length;
   } else if (isCrypto) {
     shown = rows.slice().sort((a, b) => (b.chg || 0) - (a.chg || 0));
   } else if (S.selBoard) {

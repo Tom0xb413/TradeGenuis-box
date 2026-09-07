@@ -335,6 +335,8 @@ class DashboardFamilyContractTest(unittest.TestCase):
         self.assertIn("仅旗形", self.html)
         self.assertIn("仅二次买点", self.html)
         self.assertIn("flagFilterWrap", self.html)
+        self.assertIn("boxWrap.style.display", self.html)
+        self.assertIn("titleBits[S.flagFilter]", self.html)
 
     def test_chart_marks_pole_and_handle(self):
         self.assertIn("二次 ", self.html)
