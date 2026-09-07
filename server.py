@@ -15,7 +15,7 @@ TradeGenuis · 箱体突破 本地看板服务器
   GET  /api/kline?code=     个股日K（含箱体/试盘；成功结果约 45 分钟内存+磁盘缓存）
   POST /api/scan            触发扫描 {mode, force}；1 小时内默认返回缓存
   GET  /api/status          扫描状态/日志
-  GET/POST /api/config      配置（自动扫描 / Telegram / box_mode）
+  GET/POST /api/config      配置（自动扫描 / Telegram / box_mode / pattern_family）
 
 自动扫描调度：config.auto 开启时，每个交易日 11:30 与 15:00 自动执行全市场扫描（绕过 1h 缓存）。
 """
@@ -44,6 +44,7 @@ DEFAULT_CONFIG = {
     "tg_token": "",
     "tg_chat": "",
     "box_mode": "classic",              # classic | p0 | p1（p1 为骨架，看板禁用）
+    "pattern_family": "box",            # box | high_flag（默认 box，不打断现有用户）
 }
 
 STATE = {
@@ -83,6 +84,11 @@ def parse_query(path: str) -> tuple[str, dict]:
 def configured_box_mode() -> str:
     with LOCK:
         return sc.normalize_box_mode(STATE["config"].get("box_mode"))
+
+
+def configured_pattern_family() -> str:
+    with LOCK:
+        return sc.normalize_pattern_family(STATE["config"].get("pattern_family"))
 
 
 def attach_cache_meta(payload: dict | None, *, from_cache: bool) -> dict:
@@ -141,6 +147,9 @@ def scan_cache_response(mode: str, force: bool = False) -> dict | None:
     data_box = sc.normalize_box_mode(data.get("box_mode") or "classic")
     if data_box != configured_box_mode():
         return None
+    data_fam = sc.normalize_pattern_family(data.get("pattern_family") or "box")
+    if data_fam != configured_pattern_family():
+        return None
     out = attach_cache_meta(data, from_cache=True)
     out["status"] = "cached"
     out["msg"] = "1小时内使用缓存结果，未重新全量扫描"
@@ -170,6 +179,9 @@ def save_config(cfg: dict) -> None:
     incoming = dict(cfg)
     if "box_mode" in incoming:
         incoming["box_mode"] = sc.normalize_box_mode(incoming.get("box_mode"))
+    if "pattern_family" in incoming:
+        incoming["pattern_family"] = sc.normalize_pattern_family(
+            incoming.get("pattern_family"))
     with LOCK:
         STATE["config"].update(incoming)
         data = dict(STATE["config"])
@@ -356,13 +368,16 @@ def _kline_disk_put(market: str, code: str, payload: dict) -> None:
 
 
 def _with_box(payload: dict) -> dict:
-    """按当前配置箱体模式现算 box，使 K 线叠加与卡片模式一致；不改缓存里的 bars。"""
+    """按当前配置现算 box + 旗形叠加，使 K 线与卡片形态族一致；不改缓存里的 bars。"""
     if not _valid_kline_payload(payload):
         return payload
     mode = configured_box_mode()
+    family = configured_pattern_family()
     out = dict(payload)
     out["box"] = sc.compute_box(out.get("bars") or [], mode=mode)
     out["box_mode"] = mode
+    out["flag"] = sc.detect_high_flag(out.get("bars") or [])
+    out["pattern_family"] = family
     return out
 
 
@@ -483,7 +498,9 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 cfg = dict(STATE["config"])
             cfg["box_mode"] = sc.normalize_box_mode(cfg.get("box_mode"))
+            cfg["pattern_family"] = sc.normalize_pattern_family(cfg.get("pattern_family"))
             cfg["box_modes"] = list(sc.BOX_MODES)
+            cfg["pattern_families"] = list(sc.PATTERN_FAMILIES)
             self._json(cfg)
         elif p == "/api/quotes":
             codes = [c for c in q.get("codes", "").split(",") if c.isdigit()][:100]
@@ -539,6 +556,9 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 cfg = dict(STATE["config"])
             cfg["box_modes"] = list(sc.BOX_MODES)
+            cfg["pattern_families"] = list(sc.PATTERN_FAMILIES)
+            cfg["box_mode"] = sc.normalize_box_mode(cfg.get("box_mode"))
+            cfg["pattern_family"] = sc.normalize_pattern_family(cfg.get("pattern_family"))
             self._json({"ok": True, "config": cfg})
         elif p == "/api/pool":
             body = self._body()

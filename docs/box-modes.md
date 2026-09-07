@@ -10,6 +10,8 @@
 
 切换模式后：K 线叠加会按当前模式现算（`/api/kline` 用缓存 bars 重算 box）；评分卡片仍是上一次扫描的结果，需 **强制重扫**。模式与扫描结果 `box_mode` 不一致时，1 小时扫描缓存不会命中。
 
+形态族 `pattern_family`（`box` | `high_flag`）是另一层开关：`box` 时本文件的模式全部有效；`high_flag` 时走旗形检测，见 [pattern-high-flag.md](pattern-high-flag.md)。缓存身份同时包含 `pattern_family`。
+
 ## classic（默认）
 
 - 窗口：最近 60 根；若最近 15 根内收盘有效突破「前 40 根最高价 × 1.005」，窗口截止到突破日（不含突破 K）。
