@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
@@ -43,6 +45,77 @@ def _quote(code: str = "600000") -> dict:
     return {
         "price": 10.2, "chg": 1.1, "name": "测试" + code[-2:],
         "turnover": 1.2, "volume_ratio": 1.5,
+    }
+
+
+BJT = timezone(timedelta(hours=8))
+N_FIXTURE_CARDS = 18
+
+
+def _candidate(i: int, *, qualified: bool = True) -> dict:
+    return {
+        "code": f"{600000 + i}",
+        "name": f"测试{i:02d}",
+        "score": 90 - i,
+        "qualified": qualified,
+        "price": 10 + i * 0.1,
+        "chg": 1.2,
+        "volume_days": 3,
+        "volume_ratio": 2.0,
+        "theme_ok": True,
+        "fund_5d": 1200,
+        "fund_state": "流入",
+        "control": "高",
+        "tests": 3,
+        "box_low": 9.0,
+        "box_high": 11.0,
+        "concepts": [],
+        "hot_boards": [],
+    }
+
+
+def _watch_payload(n: int = N_FIXTURE_CARDS) -> dict:
+    now = datetime.now(BJT)
+    rows = [_candidate(i) for i in range(n)]
+    return {
+        "as_of": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "updated": now.isoformat(timespec="seconds"),
+        "scope": "market",
+        "done": True,
+        "universe_size": 5000,
+        "candidates": rows,
+        "items": rows,
+        "hot_topics": [],
+    }
+
+
+def _crypto_payload(n: int = 20) -> dict:
+    now = datetime.now(BJT)
+    rows = []
+    for i in range(n):
+        rows.append({
+            "code": f"COIN{i:02d}USDT",
+            "name": f"COIN{i:02d}USDT",
+            "market": "crypto",
+            "score": 60 + i,
+            "qualified": i % 5 == 0,
+            "price": 1.2 + i,
+            "chg": 20 - i,
+            "volume_days": 2,
+            "volume_ratio": 1.5,
+            "tests": 2,
+            "box_low": 1.0,
+            "box_high": 2.0,
+        })
+    return {
+        "as_of": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "updated": now.isoformat(timespec="seconds"),
+        "scope": "crypto",
+        "done": True,
+        "universe_size": 200,
+        "candidates": rows,
+        "items": rows,
+        "hot_topics": [],
     }
 
 
@@ -224,7 +297,7 @@ class KlineHttpCacheTest(unittest.TestCase):
 
     def _get(self, path: str):
         import urllib.request
-        url = f"http://127.0.0.1:{self.port}{path}"
+        url = f"http://127.0.0.1:{self.port}/{path.lstrip('/')}"
         with urllib.request.urlopen(url, timeout=5) as r:
             return json.loads(r.read().decode("utf-8"))
 
@@ -238,6 +311,75 @@ class KlineHttpCacheTest(unittest.TestCase):
 
     def test_scan_cache_untouched(self):
         self.assertEqual(sc.SCAN_CACHE_TTL, 3600)
+
+
+class DashboardStampedeHeadlessTest(unittest.TestCase):
+    """无界面 Chrome 进页：不得按卡片数 N 路同时打 /api/kline。"""
+
+    def setUp(self):
+        chrome = shutil.which("google-chrome-stable") or shutil.which("google-chrome")
+        if not chrome:
+            self.skipTest("no chrome")
+        self.chrome = chrome
+        self.tmp = tempfile.TemporaryDirectory()
+        self.watch = Path(self.tmp.name) / "watchlist.json"
+        self.crypto = Path(self.tmp.name) / "crypto.json"
+        self.disk = Path(self.tmp.name) / "kline_cache"
+        self.watch.write_text(json.dumps(_watch_payload()), encoding="utf-8")
+        self.crypto.write_text(json.dumps(_crypto_payload()), encoding="utf-8")
+        server.STATE["kline_cache"] = {}
+        self.lock = threading.Lock()
+        self.inflight = 0
+        self.max_inflight = 0
+        self.codes = []
+
+        def fake_kline(code, lmt=160):
+            with self.lock:
+                self.inflight += 1
+                self.max_inflight = max(self.max_inflight, self.inflight)
+                self.codes.append(str(code))
+            time.sleep(0.08)
+            with self.lock:
+                self.inflight -= 1
+            return _bars()
+
+        self.patches = [
+            patch.object(server, "WATCH_FILE", self.watch),
+            patch.object(server, "KLINE_DISK_DIR", self.disk),
+            patch.object(sc, "WATCH_FILE", self.watch),
+            patch.object(sc, "CRYPTO_FILE", self.crypto),
+            patch.object(sc, "fetch_quote", side_effect=lambda code: _quote(code)),
+            patch.object(sc, "fetch_kline", side_effect=fake_kline),
+            patch.object(sc, "fetch_hot_topics", return_value=([], set())),
+        ]
+        for p in self.patches:
+            p.start()
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        self.port = self.httpd.server_address[1]
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        for p in self.patches:
+            p.stop()
+        self.tmp.cleanup()
+
+    def test_viewport_batch_not_full_stampede(self):
+        url = f"http://127.0.0.1:{self.port}/"
+        cmd = [
+            self.chrome, "--headless=new", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--window-size=1280,800",
+            "--timeout=20000", "--dump-dom", url,
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.returncode, 0, proc.stderr[-800:] if proc.stderr else "chrome failed")
+        time.sleep(1.2)
+        n_cards = N_FIXTURE_CARDS
+        n_uniq = len(set(self.codes))
+        self.assertGreater(n_uniq, 0, "visible cards should start at least one kline fetch")
+        self.assertLess(n_uniq, n_cards, f"expected viewport batch, got {n_uniq} of {n_cards}: {self.codes}")
+        self.assertLessEqual(self.max_inflight, 4, f"max inflight {self.max_inflight} codes={self.codes}")
 
 
 if __name__ == "__main__":
