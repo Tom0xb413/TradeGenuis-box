@@ -193,7 +193,7 @@ class PatternFamilyConfigTest(unittest.TestCase):
     def test_default_family_is_box(self):
         got = self._req("GET", "api/config")
         self.assertEqual(got["pattern_family"], "box")
-        self.assertEqual(got["pattern_families"], ["box", "high_flag"])
+        self.assertEqual(got["pattern_families"], ["box", "high_flag", "trendline"])
         self.assertEqual(got["box_mode"], "classic")
 
     def test_post_family_persists(self):

@@ -35,6 +35,7 @@ def _score_stub(code: str, name: str, box_mode: str = "classic") -> dict:
         "theme_ok": False, "volume_days": 0, "volume_ratio": 0.0,
         **sc.box_row_fields(None, box_mode),
         **sc.flag_row_fields(None),
+        **sc.trendline_row_fields(None),
         "fund_state": "无数据", "control": "中",
     })
 
