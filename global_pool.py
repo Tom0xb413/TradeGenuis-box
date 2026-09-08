@@ -1,27 +1,33 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-加密货币 Tab 的全球混合池：常量、K 线周期、Yahoo 行情、1h→4h/8h 重采样。
+全市场标的 Tab 的全球混合池：常量、K 线周期、符号解析、覆盖池、Yahoo 遗留适配。
 
 池子构成（可改本文件顶部常量，无需改扫描主流程）：
-  - CRYPTO_TOP_N 只 USDT 永续（24h 涨幅，Binance → 粘性 Gate，见 scanner.py）
-  - 黄金 1 只（优先交易所黄金永续，其次 Yahoo 期货/ETF）
-  - 主要美股指数若干
-  - 固定约 20 只美股（US_STOCKS）
+  - CRYPTO_TOP_N 只 USDT 永续（24h 涨幅，Binance → 粘性 Gate）
+  - 黄金 1 只（优先 Gate XAUT_USDT，其次 XAUUSDT / PAXGUSDT）
+  - 美/日/韩指数 + 固定美股大盘 + 少量日韩龙头
 
 K 线周期 crypto_interval ∈ {4h, 8h, 1d}，默认 1d。
-Yahoo 对 4h/8h 没有稳定原生周期：拉 1h 再重采样（见 resample_ohlc_hours）。
-国内 VPS 上 Yahoo 可能超时：单票失败则跳过，不中止整轮扫描。
+股票/指数在国内 VPS 走 Sina / Naver（见 equity_sources.py），不依赖 Yahoo。
+Yahoo 仅作遗留函数保留（本机 VPN 下 1h 仍可用）；扫描主路径不再 Yahoo-first。
+覆盖池非空时扫描只扫用户标的，见 data/global_override_pool.json。
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import quote
+import json
+import re
 import time
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+ROOT = Path(__file__).resolve().parent
+OVERRIDE_FILE = ROOT / "data" / "global_override_pool.json"
 
 # --------------------------------------------------------------------------- #
 # 可编辑宇宙（全球池）
@@ -31,26 +37,43 @@ CRYPTO_TOP_N = 20
 CRYPTO_INTERVALS = ("4h", "8h", "1d")
 DEFAULT_CRYPTO_INTERVAL = "1d"
 
-# 黄金：优先流动性较好的加密黄金永续；都没有再走 Yahoo。
+# 黄金：优先 Gate Tether Gold 永续 XAUT_USDT（VPS 实测；不要用 XAU_USDT 当首选）。
 # 运行时只保留 1 行，asset_class=gold，展示名「黄金」。
 GOLD_DISPLAY_NAME = "黄金"
-GOLD_CRYPTO_SYMBOLS = ("XAUUSDT", "PAXGUSDT")
-GOLD_YAHOO_SYMBOLS = ("GC=F", "GLD")  # COMEX 黄金期货 → SPDR 黄金 ETF
+GOLD_CRYPTO_SYMBOLS = ("XAUTUSDT", "XAUUSDT", "PAXGUSDT")
+GOLD_YAHOO_SYMBOLS = ("GC=F", "GLD")  # 遗留；扫描主路径不再走 Yahoo
 
-# 美股指数（Yahoo 符号）。改列表即改池子。
+# 美股指数：新浪 staticdata / JSONP 代码（勿用 Yahoo ^GSPC，VPS 上 Yahoo 403）。
 US_INDICES: tuple[dict, ...] = (
-    {"symbol": "^GSPC", "name": "标普500"},
-    {"symbol": "^DJI", "name": "道指"},
-    {"symbol": "^IXIC", "name": "纳指"},
-    {"symbol": "^NDX", "name": "纳斯达克100"},
+    {"symbol": ".INX", "name": "标普500", "znb": "SPX", "sina_symbol": ".INX"},
+    {"symbol": ".DJI", "name": "道指", "znb": "DJI", "sina_symbol": ".DJI"},
+    {"symbol": ".IXIC", "name": "纳指", "znb": "IXIC", "sina_symbol": ".IXIC"},
+    {"symbol": ".NDX", "name": "纳斯达克100", "znb": "NDX", "sina_symbol": ".NDX"},
 )
 
-# 固定约 20 只美股大盘（Yahoo 符号；伯克希尔用 BRK-B）。
+# 固定约 20 只美股大盘（Sina/Naver；伯克希尔用 BRK-B → 新浪 BRK.B）。
 US_STOCKS: tuple[str, ...] = (
     "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN",
     "META", "TSLA", "BRK-B", "JPM", "V",
     "UNH", "XOM", "JNJ", "WMT", "MA",
     "PG", "HD", "COST", "AVGO", "NFLX",
+)
+
+# 日/韩指数与少量龙头（改列表即改默认池）。
+JP_INDICES: tuple[dict, ...] = (
+    {"symbol": "NKY", "name": "日经225", "sina_gi": "NKY", "ak_name": "日经225指数"},
+)
+KR_INDICES: tuple[dict, ...] = (
+    {"symbol": "KOSPI", "name": "KOSPI", "naver_code": "KOSPI", "ak_name": "首尔综合指数"},
+    {"symbol": "KOSDAQ", "name": "KOSDAQ", "naver_code": "KOSDAQ"},
+)
+JP_STOCKS: tuple[dict, ...] = (
+    {"symbol": "7203.T", "name": "丰田"},
+    {"symbol": "6758.T", "name": "索尼"},
+)
+KR_STOCKS: tuple[dict, ...] = (
+    {"symbol": "005930", "name": "三星电子"},
+    {"symbol": "000660", "name": "SK海力士"},
 )
 
 YAHOO_TIMEOUT = 10.0
@@ -74,19 +97,38 @@ _YAHOO_HTTP.mount(
 
 _yahoo_symbol_set: set[str] | None = None
 
+# 用户输入别名 → 规范代码（resolve_symbol 再填 display / asset_class）
+_INDEX_ALIAS: dict[str, str] = {
+    "^GSPC": ".INX", "GSPC": ".INX", "SPX": ".INX", ".INX": ".INX",
+    "标普500": ".INX", "标普": ".INX",
+    "^DJI": ".DJI", "DJI": ".DJI", ".DJI": ".DJI", "道指": ".DJI", "道琼斯": ".DJI",
+    "^IXIC": ".IXIC", "IXIC": ".IXIC", ".IXIC": ".IXIC", "纳指": ".IXIC",
+    "^NDX": ".NDX", "NDX": ".NDX", ".NDX": ".NDX", "纳斯达克100": ".NDX",
+    "日经225指数": "NKY", "日经225": "NKY", "N225": "NKY", "NKY": "NKY",
+    ".N225": "NKY", "NIKKEI": "NKY",
+    "首尔综合指数": "KOSPI", "KOSPI": "KOSPI", "KS11": "KOSPI",
+    "KOSDAQ": "KOSDAQ",
+    "黄金": "XAUTUSDT", "XAU": "XAUTUSDT", "XAUT": "XAUTUSDT",
+    "XAUTUSDT": "XAUTUSDT", "XAUT_USDT": "XAUTUSDT",
+    "XAUUSDT": "XAUUSDT", "XAU_USDT": "XAUUSDT",
+    "PAXGUSDT": "PAXGUSDT", "PAXG_USDT": "PAXGUSDT",
+    "GC=F": "XAUTUSDT", "GLD": "XAUTUSDT",
+}
+
 
 def yahoo_symbol_set() -> set[str]:
-    """指数 + 美股 + Yahoo 黄金符号，供 K 线路由识别。"""
+    """遗留：旧 Yahoo 符号集合（美股代码仍在此，供 is_yahoo_symbol 测试）。"""
     global _yahoo_symbol_set
     if _yahoo_symbol_set is None:
         _yahoo_symbol_set = set(US_STOCKS)
         _yahoo_symbol_set.update(x["symbol"] for x in US_INDICES)
         _yahoo_symbol_set.update(GOLD_YAHOO_SYMBOLS)
+        _yahoo_symbol_set.update(("^GSPC", "^DJI", "^IXIC", "^NDX"))
     return _yahoo_symbol_set
 
 
 def is_yahoo_symbol(code: str) -> bool:
-    """是否走 Yahoo chart（指数 ^、期货 =F、固定美股/黄金列表）。"""
+    """遗留检测：指数 ^、期货 =F、固定美股列表。扫描主路径不再据此走 Yahoo。"""
     raw = (code or "").strip()
     if not raw:
         return False
@@ -96,11 +138,239 @@ def is_yahoo_symbol(code: str) -> bool:
 
 
 def is_crypto_perp_symbol(code: str) -> bool:
-    """USDT 永续风格代码（含加密黄金 XAUUSDT / PAXGUSDT）。"""
+    """USDT 永续风格代码（含加密黄金 XAUTUSDT / XAUUSDT / PAXGUSDT）。"""
     s = (code or "").replace("_", "").replace("-", "").upper()
     if s in GOLD_CRYPTO_SYMBOLS:
         return True
-    return bool(s.endswith("USDT") and s.isalnum() and len(s) > 4 and "^" not in (code or "") and "=" not in (code or ""))
+    return bool(s.endswith("USDT") and s.isalnum() and len(s) > 4
+                and "^" not in (code or "") and "=" not in (code or ""))
+
+
+def _norm_crypto(sym: str) -> str:
+    return (sym or "").replace("_", "").replace("-", "").upper()
+
+
+def parse_symbol_text(text: str) -> list[str]:
+    """textarea：逗号/中文逗号/分号/换行分隔；去掉空项，保序去重。"""
+    raw = (text or "").replace("，", ",").replace("、", ",").replace(";", ",").replace("；", ",")
+    parts: list[str] = []
+    seen: set[str] = set()
+    for line in raw.splitlines():
+        for p in line.split(","):
+            s = p.strip()
+            if not s:
+                continue
+            key = s.upper()
+            if key in seen:
+                continue
+            seen.add(key)
+            parts.append(s)
+    return parts
+
+
+def _ident(code: str, name: str, asset_class: str, source: str, **extra) -> dict:
+    out = {
+        "code": code,
+        "name": name or code,
+        "asset_class": asset_class,
+        "source": source,
+        "market": "crypto",
+        "known": bool(extra.pop("known", False)),
+    }
+    out.update(extra)
+    return out
+
+
+def _lookup_static(code: str) -> dict | None:
+    """默认池常量里的展示名 / 元数据。"""
+    for idx in US_INDICES:
+        if idx["symbol"] == code:
+            return _ident(code, idx["name"], "us_index", "sina",
+                          sina_symbol=idx.get("sina_symbol") or code,
+                          znb=idx.get("znb"), known=True)
+    for idx in JP_INDICES:
+        if idx["symbol"] == code:
+            return _ident(code, idx["name"], "jp_index", "sina",
+                          sina_gi=idx.get("sina_gi") or "NKY", known=True)
+    for idx in KR_INDICES:
+        if idx["symbol"] == code:
+            return _ident(code, idx["name"], "kr_index", "naver",
+                          naver_code=idx.get("naver_code") or code, known=True)
+    for stk in JP_STOCKS:
+        if stk["symbol"].upper() == code.upper():
+            return _ident(stk["symbol"], stk["name"], "jp_stock", "naver",
+                          naver_code=stk["symbol"], known=True)
+    for stk in KR_STOCKS:
+        if stk["symbol"] == code:
+            return _ident(code, stk["name"], "kr_stock", "naver", known=True)
+    if code in US_STOCKS:
+        return _ident(code, code, "us_stock", "sina", known=True)
+    if code in GOLD_CRYPTO_SYMBOLS:
+        return _ident(code, GOLD_DISPLAY_NAME, "gold", "crypto", known=True)
+    return None
+
+
+def resolve_symbol(raw: str) -> dict | None:
+    """
+    把用户输入规范为内部 ident。
+    例：AAPL、7203.T、005930、.INX、日经225指数、BTCUSDT、黄金。
+    无法归类则返回 None（校验层报「未知标的」）。
+    """
+    s = (raw or "").strip()
+    if not s:
+        return None
+    alias_key = s if s in _INDEX_ALIAS else s.upper().replace(" ", "")
+    if s in _INDEX_ALIAS:
+        s = _INDEX_ALIAS[s]
+    elif alias_key in _INDEX_ALIAS:
+        s = _INDEX_ALIAS[alias_key]
+    else:
+        s = s.strip()
+
+    hit = _lookup_static(s) or _lookup_static(s.upper())
+    if hit:
+        return hit
+
+    cu = _norm_crypto(s)
+    if cu in GOLD_CRYPTO_SYMBOLS:
+        return _ident(cu, GOLD_DISPLAY_NAME, "gold", "crypto", known=True)
+    if is_crypto_perp_symbol(s) and cu not in GOLD_CRYPTO_SYMBOLS:
+        return _ident(cu, cu, "crypto", "crypto")
+
+    up = s.upper()
+    if re.fullmatch(r"\d{3,5}\.T", up):
+        digits = up[:-2]
+        return _ident(f"{digits}.T", f"{digits}.T", "jp_stock", "naver",
+                      naver_code=f"{digits}.T")
+    if re.fullmatch(r"\d{4}", s):
+        return _ident(f"{s}.T", f"{s}.T", "jp_stock", "naver", naver_code=f"{s}.T")
+    if re.fullmatch(r"\d{6}", s):
+        return _ident(s, s, "kr_stock", "naver")
+
+    if up in (".INX", ".DJI", ".IXIC", ".NDX"):
+        names = {".INX": "标普500", ".DJI": "道指", ".IXIC": "纳指", ".NDX": "纳斯达克100"}
+        znb = {".INX": "SPX", ".DJI": "DJI", ".IXIC": "IXIC", ".NDX": "NDX"}
+        return _ident(up, names[up], "us_index", "sina", sina_symbol=up, znb=znb[up], known=True)
+
+    # 美股 ticker：1–5 字母，可选 -B / .B
+    us = up.replace(".", "-")
+    if re.fullmatch(r"[A-Z]{1,5}(?:-[A-Z])?", us):
+        code = us
+        if code.endswith("-B") and code.count("-") == 1:
+            pass
+        return _ident(code, code, "us_stock", "sina")
+    return None
+
+
+def override_fingerprint(symbols: list[str] | None = None) -> str:
+    """扫描缓存身份：覆盖列表规范化后排序拼接。空 = 默认池。"""
+    codes = symbols if symbols is not None else load_override_symbols()
+    norm = []
+    for s in codes or []:
+        ident = resolve_symbol(s)
+        if ident:
+            norm.append(ident["code"])
+    return ",".join(sorted(set(norm)))
+
+
+def load_override_symbols() -> list[str]:
+    """读取覆盖池。损坏/缺失视为空（走默认混合池）。"""
+    try:
+        if not OVERRIDE_FILE.is_file():
+            return []
+        data = json.loads(OVERRIDE_FILE.read_text(encoding="utf-8"))
+        raw = data.get("symbols") if isinstance(data, dict) else data
+        if not isinstance(raw, list):
+            return []
+        out, seen = [], set()
+        for x in raw:
+            s = str(x or "").strip()
+            if not s or s.upper() in seen:
+                continue
+            seen.add(s.upper())
+            out.append(s)
+        return out
+    except Exception:
+        return []
+
+
+def save_override_symbols(symbols: list[str]) -> list[str]:
+    """写入覆盖池 JSON。空列表 = 清除，扫描回默认池。"""
+    OVERRIDE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    cleaned, seen = [], set()
+    for x in symbols or []:
+        s = str(x or "").strip()
+        if not s:
+            continue
+        ident = resolve_symbol(s)
+        code = ident["code"] if ident else s
+        if code.upper() in seen:
+            continue
+        seen.add(code.upper())
+        cleaned.append(code)
+    OVERRIDE_FILE.write_text(
+        json.dumps({"symbols": cleaned}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return cleaned
+
+
+def clear_override_symbols() -> None:
+    save_override_symbols([])
+
+
+def validate_symbol(code: str, crypto_ok=None) -> dict:
+    """
+    校验单只标的。返回 {ok, code, name, asset_class, source, reason}。
+    crypto_ok(canonical) 用于永续是否在交易所 ticker 列表；黄金常量直接通过。
+    """
+    raw = (code or "").strip()
+    ident = resolve_symbol(raw)
+    if not ident:
+        return {"ok": False, "code": raw, "name": raw, "asset_class": "",
+                "source": "", "reason": "未知标的"}
+    cls = ident["asset_class"]
+    if cls == "gold":
+        return {"ok": True, "reason": "", **{k: ident[k] for k in
+                ("code", "name", "asset_class", "source")}}
+    if cls == "crypto":
+        ok = True
+        reason = ""
+        if crypto_ok is not None:
+            try:
+                ok = bool(crypto_ok(ident["code"]))
+            except Exception:
+                ok = False
+            if not ok:
+                reason = "永续合约列表中不存在"
+        return {"ok": ok, "reason": reason, **{k: ident[k] for k in
+                ("code", "name", "asset_class", "source")}}
+    try:
+        from equity_sources import validate_equity
+        ok, reason = validate_equity(ident)
+    except Exception as e:
+        ok, reason = (True, "") if ident.get("known") else (False, str(e)[:80])
+    return {"ok": ok, "reason": reason, **{k: ident[k] for k in
+            ("code", "name", "asset_class", "source")}}
+
+
+def validate_symbols(symbols: list[str], crypto_ok=None) -> dict:
+    """批量校验。ok[] 为通过项，bad[] 为 {code, reason}。"""
+    ok_rows, bad_rows, seen = [], [], set()
+    for raw in symbols or []:
+        s = str(raw or "").strip()
+        if not s:
+            continue
+        key = s.upper()
+        if key in seen:
+            continue
+        seen.add(key)
+        row = validate_symbol(s, crypto_ok=crypto_ok)
+        if row.get("ok"):
+            ok_rows.append({k: row[k] for k in ("code", "name", "asset_class", "source")})
+        else:
+            bad_rows.append({"code": s, "reason": row.get("reason") or "无法解析"})
+    return {"ok": ok_rows, "bad": bad_rows}
 
 
 # --------------------------------------------------------------------------- #
@@ -201,20 +471,69 @@ def _pool_item(code: str, name: str, asset_class: str, source: str,
         "price": price,
         "chg": chg,
         "asset_class": asset_class,
-        "market": "crypto",  # 仍走加密货币 Tab / /api/crypto / kline market=crypto
+        "market": "crypto",  # 仍走全市场标的 Tab / /api/crypto / kline market=crypto
         "source": source,
     }
 
 
-def build_global_pool(crypto_tickers: list[dict], top_n: int = CRYPTO_TOP_N,
-                      gold: dict | None = None) -> list[dict]:
-    """
-    组装加密货币 Tab 扫描池：涨幅 TOP N 永续 + 黄金 + 指数 + US_STOCKS。
+def _ident_to_pool_item(ident: dict, ticker_map: dict | None = None) -> dict:
+    code = ident["code"]
+    item = _pool_item(code, ident.get("name") or code,
+                      ident.get("asset_class") or "us_stock",
+                      ident.get("source") or "equity")
+    tmap = ticker_map or {}
+    t = tmap.get(_norm_crypto(code)) or tmap.get(code)
+    if t:
+        item["price"] = t.get("price")
+        item["chg"] = t.get("chg")
+    for k in ("sina_symbol", "naver_code", "znb", "sina_gi"):
+        if ident.get(k):
+            item[k] = ident[k]
+    return item
 
-    crypto_tickers 项至少含 symbol / price / chg（与 fetch_crypto_tickers 一致）。
-    gold 已解析的一行（可空：本轮黄金全失败则不加）。
-    按 code 去重；黄金候选不占用 TOP N 名额。
+
+def build_override_pool(symbols: list[str], crypto_tickers: list[dict] | None = None,
+                        gold: dict | None = None) -> list[dict]:
+    """覆盖池非空：只扫这些标的（仍应用 crypto_interval / 形态）。无法 resolve 的跳过。"""
+    ticker_map = {}
+    for t in crypto_tickers or []:
+        sym = _norm_crypto(str(t.get("symbol") or t.get("code") or ""))
+        if sym:
+            ticker_map[sym] = t
+    pool, seen = [], set()
+    for raw in symbols or []:
+        ident = resolve_symbol(str(raw))
+        if not ident:
+            continue
+        code = ident["code"]
+        if code in seen:
+            continue
+        seen.add(code)
+        if ident["asset_class"] == "gold" and gold and gold.get("code"):
+            g = dict(gold)
+            g.setdefault("name", GOLD_DISPLAY_NAME)
+            g.setdefault("asset_class", "gold")
+            g.setdefault("market", "crypto")
+            g["code"] = gold.get("code") or code
+            pool.append(g)
+            continue
+        pool.append(_ident_to_pool_item(ident, ticker_map))
+    return pool
+
+
+def build_global_pool(crypto_tickers: list[dict], top_n: int = CRYPTO_TOP_N,
+                      gold: dict | None = None,
+                      override_symbols: list[str] | None = None) -> list[dict]:
     """
+    组装全市场标的 Tab 扫描池。
+
+    override_symbols 非空：只使用这些标的。
+    否则：涨幅 TOP N 永续 + 黄金 + 美/日/韩指数 + US_STOCKS + 日韩龙头。
+    黄金候选不占用 TOP N 名额。
+    """
+    if override_symbols:
+        return build_override_pool(override_symbols, crypto_tickers=crypto_tickers, gold=gold)
+
     n = int(top_n) if top_n else CRYPTO_TOP_N
     n = max(1, n)
     gold_codes = set(GOLD_CRYPTO_SYMBOLS)
@@ -235,7 +554,7 @@ def build_global_pool(crypto_tickers: list[dict], top_n: int = CRYPTO_TOP_N,
     for t in crypto_tickers or []:
         if taken >= n:
             break
-        sym = str(t.get("symbol") or t.get("code") or "").replace("_", "").replace("-", "").upper()
+        sym = _norm_crypto(str(t.get("symbol") or t.get("code") or ""))
         if not sym or sym in gold_codes:
             continue
         add(_pool_item(
@@ -253,10 +572,27 @@ def build_global_pool(crypto_tickers: list[dict], top_n: int = CRYPTO_TOP_N,
         add(g)
 
     for idx in US_INDICES:
-        add(_pool_item(idx["symbol"], idx["name"], "us_index", "yahoo"))
+        it = _pool_item(idx["symbol"], idx["name"], "us_index", "sina")
+        it["sina_symbol"] = idx.get("sina_symbol") or idx["symbol"]
+        if idx.get("znb"):
+            it["znb"] = idx["znb"]
+        add(it)
 
     for stk in US_STOCKS:
-        add(_pool_item(stk, stk, "us_stock", "yahoo"))
+        add(_pool_item(stk, stk, "us_stock", "sina"))
+
+    for idx in JP_INDICES:
+        add(_pool_item(idx["symbol"], idx["name"], "jp_index", "sina"))
+    for stk in JP_STOCKS:
+        it = _pool_item(stk["symbol"], stk["name"], "jp_stock", "naver")
+        it["naver_code"] = stk["symbol"]
+        add(it)
+    for idx in KR_INDICES:
+        it = _pool_item(idx["symbol"], idx["name"], "kr_index", "naver")
+        it["naver_code"] = idx.get("naver_code") or idx["symbol"]
+        add(it)
+    for stk in KR_STOCKS:
+        add(_pool_item(stk["symbol"], stk["name"], "kr_stock", "naver"))
 
     return pool
 
@@ -267,6 +603,10 @@ def static_global_counts() -> dict:
         "gold": 1,
         "us_index": len(US_INDICES),
         "us_stock": len(US_STOCKS),
+        "jp_index": len(JP_INDICES),
+        "jp_stock": len(JP_STOCKS),
+        "kr_index": len(KR_INDICES),
+        "kr_stock": len(KR_STOCKS),
     }
 
 

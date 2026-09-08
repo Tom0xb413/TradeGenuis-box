@@ -152,6 +152,14 @@ class PoolBuilderTest(unittest.TestCase):
         self.assertEqual({x["code"] for x in by["us_stock"]}, set(gp.US_STOCKS))
         self.assertTrue(all(x["market"] == "crypto" for x in pool))
         self.assertEqual(sc.CRYPTO_TOP_N, 20)
+        self.assertIn("jp_index", by)
+        self.assertEqual({x["code"] for x in by["jp_index"]}, {x["symbol"] for x in gp.JP_INDICES})
+        self.assertIn("NKY", {x["code"] for x in by["jp_index"]})
+        self.assertIn("KOSPI", {x["code"] for x in by["kr_index"]})
+        self.assertIn("KOSDAQ", {x["code"] for x in by["kr_index"]})
+        self.assertIn("7203.T", {x["code"] for x in by["jp_stock"]})
+        self.assertIn("005930", {x["code"] for x in by["kr_stock"]})
+        self.assertTrue(all(x["source"] != "yahoo" for x in pool if x["asset_class"] != "crypto"))
 
     def test_gold_perp_not_counted_in_topn(self):
         tickers = [{"symbol": "XAUUSDT", "price": 1, "chg": 99}] + _tickers(20)
@@ -175,30 +183,64 @@ class PoolBuilderTest(unittest.TestCase):
         self.assertFalse(gp.is_yahoo_symbol("BTCUSDT"))
         self.assertFalse(gp.is_yahoo_symbol("XAUUSDT"))
 
+    def test_override_empty_uses_default(self):
+        pool = gp.build_global_pool(_tickers(5), top_n=5, gold=_gold_row(), override_symbols=None)
+        self.assertGreater(len(pool), 5)
+        self.assertTrue(any(x["asset_class"] == "crypto" for x in pool))
+        self.assertTrue(any(x["code"] == "NKY" for x in pool))
+
+    def test_override_nonempty_only_those_symbols(self):
+        pool = gp.build_global_pool(
+            _tickers(25), top_n=20, gold=_gold_row(),
+            override_symbols=["AAPL", "7203.T", "BTCUSDT"],
+        )
+        codes = [x["code"] for x in pool]
+        self.assertEqual(set(codes), {"AAPL", "7203.T", "BTCUSDT"})
+        self.assertFalse(any(x["asset_class"] == "us_index" for x in pool))
+        by = {x["code"]: x for x in pool}
+        self.assertEqual(by["AAPL"]["asset_class"], "us_stock")
+        self.assertEqual(by["7203.T"]["asset_class"], "jp_stock")
+        self.assertEqual(by["BTCUSDT"]["asset_class"], "crypto")
+
+    def test_resolve_symbol_aliases(self):
+        self.assertEqual(gp.resolve_symbol("AAPL")["asset_class"], "us_stock")
+        self.assertEqual(gp.resolve_symbol("^GSPC")["code"], ".INX")
+        self.assertEqual(gp.resolve_symbol("标普500")["code"], ".INX")
+        self.assertEqual(gp.resolve_symbol("日经225指数")["code"], "NKY")
+        self.assertEqual(gp.resolve_symbol("7203.T")["asset_class"], "jp_stock")
+        self.assertEqual(gp.resolve_symbol("005930")["asset_class"], "kr_stock")
+        self.assertEqual(gp.resolve_symbol("黄金")["code"], "XAUTUSDT")
+        self.assertEqual(gp.resolve_symbol("BTCUSDT")["asset_class"], "crypto")
+        self.assertIsNone(gp.resolve_symbol("NOT_A_THING_ZZZ"))
+        self.assertIsNone(gp.resolve_symbol(""))
+
 
 class ResolveGoldTest(unittest.TestCase):
-    def test_prefers_ticker_xau(self):
-        tickers = [{"symbol": "XAUUSDT", "price": 2410.0, "chg": 0.3}]
+    def test_prefers_xaut_over_xau(self):
+        tickers = [
+            {"symbol": "XAUUSDT", "price": 2410.0, "chg": 0.3},
+            {"symbol": "XAUTUSDT", "price": 2420.0, "chg": 0.5},
+        ]
         g = sc.resolve_gold_instrument(tickers)
-        self.assertEqual(g["code"], "XAUUSDT")
+        self.assertEqual(g["code"], "XAUTUSDT")
         self.assertEqual(g["source"], "crypto")
         self.assertEqual(g["name"], "黄金")
 
-    def test_yahoo_fallback_when_crypto_empty(self):
-        def boom(*_a, **_k):
-            raise TimeoutError("no perp gold")
+    def test_falls_back_to_xau_when_xaut_missing(self):
+        tickers = [{"symbol": "XAUUSDT", "price": 2410.0, "chg": 0.3}]
+        g = sc.resolve_gold_instrument(tickers)
+        self.assertEqual(g["code"], "XAUUSDT")
 
-        def fake_yahoo(symbol, interval="1d", lookback=8):
-            if symbol != "GC=F":
-                return None
-            return {"code": "GC=F", "name": "Gold", "price": 2300.0, "chg": 0.1,
-                    "bars": _daily_bars(8), "source": "yahoo"}
+    def test_kline_fallback_when_ticker_empty(self):
+        def fake_kline(sym, limit=8, interval="1d"):
+            if sym != "XAUTUSDT":
+                return []
+            return _daily_bars(8)
 
-        with patch.object(sc, "fetch_crypto_kline", side_effect=boom), \
-             patch.object(sc, "fetch_yahoo_instrument", side_effect=fake_yahoo):
+        with patch.object(sc, "fetch_crypto_kline", side_effect=fake_kline):
             g = sc.resolve_gold_instrument([])
-        self.assertEqual(g["code"], "GC=F")
-        self.assertEqual(g["source"], "yahoo")
+        self.assertEqual(g["code"], "XAUTUSDT")
+        self.assertEqual(g["source"], "crypto")
         self.assertEqual(g["name"], "黄金")
 
 
@@ -208,21 +250,24 @@ class RunCryptoScanPoolTest(unittest.TestCase):
         bars = _daily_bars(50)
         events = []
 
-        def fake_yahoo(symbol, interval="1d", lookback=200):
+        def fake_inst(code, interval="1d", lookback=200, hint_source=None, hint_class=None):
             return {
-                "code": symbol, "name": symbol, "price": 12.0, "chg": 1.2,
-                "bars": bars, "source": "yahoo",
+                "code": code, "name": code, "price": 12.0, "chg": 1.2,
+                "bars": bars, "source": hint_source or "sina",
+                "asset_class": hint_class or "us_stock",
             }
 
         with tempfile.TemporaryDirectory() as td:
             crypto_file = Path(td) / "crypto.json"
+            ov_file = Path(td) / "global_override_pool.json"
             with patch.object(sc, "fetch_crypto_tickers", return_value=tickers), \
                  patch.object(sc, "resolve_gold_instrument", return_value=_gold_row()), \
-                 patch.object(sc, "fetch_crypto_kline", return_value=bars), \
-                 patch.object(sc, "fetch_yahoo_instrument", side_effect=fake_yahoo), \
+                 patch.object(sc, "fetch_global_instrument", side_effect=fake_inst), \
                  patch.object(sc, "load_crypto_interval", return_value="1d"), \
                  patch.object(sc, "CRYPTO_FILE", crypto_file), \
-                 patch.object(sc, "DATA", Path(td)):
+                 patch.object(sc, "DATA", Path(td)), \
+                 patch.object(gp, "OVERRIDE_FILE", ov_file), \
+                 patch.object(sc, "load_override_symbols", return_value=[]):
                 rows = sc.run_crypto_scan(top=20, workers=4,
                                           progress=lambda m, **k: events.append(m))
             payload = json.loads(crypto_file.read_text(encoding="utf-8"))
@@ -231,12 +276,40 @@ class RunCryptoScanPoolTest(unittest.TestCase):
         self.assertIn("gold", classes)
         self.assertIn("us_index", classes)
         self.assertIn("us_stock", classes)
+        self.assertIn("jp_index", classes)
+        self.assertIn("kr_index", classes)
         self.assertEqual(sum(1 for r in rows if r["asset_class"] == "crypto"), 20)
         self.assertEqual(sum(1 for r in rows if r["asset_class"] == "us_stock"), 20)
         self.assertEqual(payload["crypto_interval"], "1d")
         self.assertEqual(payload["scope"], "crypto")
+        self.assertEqual(payload["pool_mode"], "default")
         self.assertEqual(payload["gold"]["code"], "XAUUSDT")
-        self.assertTrue(any("全球池" in m or "TOP" in m for m in events))
+        self.assertTrue(any("全市场标的" in m or "默认" in m or "TOP" in m for m in events))
+
+    def test_scan_override_only_requested_symbols(self):
+        bars = _daily_bars(50)
+        tickers = _tickers(22)
+
+        def fake_inst(code, interval="1d", lookback=200, hint_source=None, hint_class=None):
+            return {
+                "code": code, "name": code, "price": 12.0, "chg": 1.2,
+                "bars": bars, "source": "sina", "asset_class": hint_class or "us_stock",
+            }
+
+        with tempfile.TemporaryDirectory() as td:
+            crypto_file = Path(td) / "crypto.json"
+            with patch.object(sc, "fetch_crypto_tickers", return_value=tickers), \
+                 patch.object(sc, "resolve_gold_instrument", return_value=None), \
+                 patch.object(sc, "fetch_global_instrument", side_effect=fake_inst), \
+                 patch.object(sc, "load_crypto_interval", return_value="1d"), \
+                 patch.object(sc, "CRYPTO_FILE", crypto_file), \
+                 patch.object(sc, "DATA", Path(td)), \
+                 patch.object(sc, "load_override_symbols", return_value=["AAPL", "7203.T"]):
+                rows = sc.run_crypto_scan(top=20, workers=2)
+            payload = json.loads(crypto_file.read_text(encoding="utf-8"))
+        self.assertEqual({r["code"] for r in rows}, {"AAPL", "7203.T"})
+        self.assertEqual(payload["pool_mode"], "override")
+        self.assertEqual(payload["override_symbols"], ["AAPL", "7203.T"])
 
 
 class IntervalCacheTest(unittest.TestCase):
@@ -244,16 +317,20 @@ class IntervalCacheTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.crypto = Path(self.tmp.name) / "crypto.json"
         self.watch = Path(self.tmp.name) / "watchlist.json"
+        self.ov = Path(self.tmp.name) / "global_override_pool.json"
         self.p_c = patch.object(sc, "CRYPTO_FILE", self.crypto)
         self.p_w = patch.object(server, "WATCH_FILE", self.watch)
+        self.p_o = patch.object(gp, "OVERRIDE_FILE", self.ov)
         self.p_c.start()
         self.p_w.start()
+        self.p_o.start()
         server.reset_scan_runtime_state()
         server.STATE["config"] = dict(server.DEFAULT_CONFIG)
 
     def tearDown(self):
         self.p_c.stop()
         self.p_w.stop()
+        self.p_o.stop()
         server.STATE["config"] = dict(server.DEFAULT_CONFIG)
         self.tmp.cleanup()
 
@@ -293,6 +370,15 @@ class IntervalCacheTest(unittest.TestCase):
         server.STATE["config"]["crypto_interval"] = "1d"
         self.assertIsNotNone(server.scan_cache_response("crypto", force=False))
         server.STATE["config"]["crypto_interval"] = "8h"
+        self.assertIsNone(server.scan_cache_response("crypto", force=False))
+
+    def test_miss_when_override_fingerprint_differs(self):
+        p = self._crypto_payload("1d")
+        p["override_fingerprint"] = ""
+        self.crypto.write_text(json.dumps(p), encoding="utf-8")
+        server.STATE["config"]["crypto_interval"] = "1d"
+        self.assertIsNotNone(server.scan_cache_response("crypto", force=False))
+        gp.save_override_symbols(["AAPL"])
         self.assertIsNone(server.scan_cache_response("crypto", force=False))
 
     def test_market_cache_ignores_crypto_interval(self):
@@ -404,11 +490,133 @@ class DashboardGlobalPoolContractTest(unittest.TestCase):
         self.assertIn('data-interval="8h"', self.html)
         self.assertIn('data-interval="1d"', self.html)
         self.assertIn("setCryptoInterval", self.html)
-        self.assertIn("全球池", self.html)
+        self.assertIn("全市场标的", self.html)
+        self.assertNotIn(">加密货币<", self.html)
         self.assertIn("poolFilterWrap", self.html)
         self.assertIn("仅美股", self.html)
+        self.assertIn("日股", self.html)
+        self.assertIn("韩股", self.html)
         self.assertIn("黄金+指数", self.html)
         self.assertIn("asset-badge", self.html)
+        self.assertIn("hpCoverWrap", self.html)
+        self.assertIn("coverModal", self.html)
+        self.assertIn("openCoverModal", self.html)
+        self.assertIn("api/global_pool/override", self.html)
+        self.assertIn("覆盖池已变更", self.html)
+
+
+class ValidateSymbolTest(unittest.TestCase):
+    def test_known_without_live(self):
+        row = gp.validate_symbol("黄金", crypto_ok=lambda *_: False)
+        self.assertTrue(row["ok"])
+        self.assertEqual(row["code"], "XAUTUSDT")
+        self.assertEqual(row["asset_class"], "gold")
+
+    def test_crypto_callback(self):
+        ok = gp.validate_symbol("BTCUSDT", crypto_ok=lambda c: c == "BTCUSDT")
+        self.assertTrue(ok["ok"])
+        bad = gp.validate_symbol("NOPEUSDT", crypto_ok=lambda c: False)
+        self.assertFalse(bad["ok"])
+        self.assertIn("永续", bad["reason"])
+
+    def test_unknown(self):
+        row = gp.validate_symbol("!!!", crypto_ok=lambda *_: True)
+        self.assertFalse(row["ok"])
+        self.assertEqual(row["reason"], "未知标的")
+
+    def test_batch_reports_rejected(self):
+        def fake_eq(ident):
+            if ident["asset_class"] == "us_stock" and ident["code"] == "AAPL":
+                return True, ""
+            if ident.get("known"):
+                return True, ""
+            return False, "新浪/Naver 无此美股"
+
+        with patch("equity_sources.validate_equity", side_effect=fake_eq):
+            out = gp.validate_symbols(
+                ["AAPL", "FOO999", "日经225指数", "BTCUSDT"],
+                crypto_ok=lambda c: c == "BTCUSDT",
+            )
+        codes = {x["code"] for x in out["ok"]}
+        self.assertIn("AAPL", codes)
+        self.assertIn("NKY", codes)
+        self.assertIn("BTCUSDT", codes)
+        self.assertTrue(any(x["code"] == "FOO999" for x in out["bad"]))
+
+
+class OverridePersistTest(unittest.TestCase):
+    def test_save_load_clear(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "ov.json"
+            with patch.object(gp, "OVERRIDE_FILE", path):
+                self.assertEqual(gp.load_override_symbols(), [])
+                saved = gp.save_override_symbols(["AAPL", "7203.T", "AAPL"])
+                self.assertEqual(saved, ["AAPL", "7203.T"])
+                self.assertEqual(gp.load_override_symbols(), ["AAPL", "7203.T"])
+                self.assertTrue(gp.override_fingerprint().startswith("7203.T") or "AAPL" in gp.override_fingerprint())
+                gp.clear_override_symbols()
+                self.assertEqual(gp.load_override_symbols(), [])
+                self.assertEqual(gp.override_fingerprint(), "")
+
+
+class OverrideHttpTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ov = Path(self.tmp.name) / "ov.json"
+        server.STATE["config"] = dict(server.DEFAULT_CONFIG)
+        self.p = patch.object(gp, "OVERRIDE_FILE", self.ov)
+        self.p.start()
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        self.port = self.httpd.server_address[1]
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.p.stop()
+        server.STATE["config"] = dict(server.DEFAULT_CONFIG)
+        self.tmp.cleanup()
+
+    def _req(self, method: str, path: str, body=None):
+        import urllib.request
+        url = f"http://127.0.0.1:{self.port}/{path.lstrip('/')}"
+        data = None if body is None else json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(url, data=data, method=method)
+        if body is not None:
+            req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(req, timeout=8) as r:
+            return json.loads(r.read().decode("utf-8"))
+
+    def test_get_empty_default(self):
+        got = self._req("GET", "api/global_pool/override")
+        self.assertEqual(got["mode"], "default")
+        self.assertEqual(got["count"], 0)
+
+    def test_validate_and_save_only_valids(self):
+        def fake_eq(ident):
+            if ident["code"] in ("AAPL", "NKY") or ident.get("known"):
+                return True, ""
+            return False, "新浪/Naver 无此美股"
+
+        with patch("equity_sources.validate_equity", side_effect=fake_eq), \
+             patch.object(sc, "crypto_symbol_is_listed", return_value=True):
+            v = self._req("POST", "api/global_pool/validate",
+                          {"symbols": ["AAPL", "NOTREALZZ", "BTCUSDT"]})
+            saved = self._req("POST", "api/global_pool/override",
+                              {"symbols": ["AAPL", "NOTREALZZ", "BTCUSDT"]})
+        self.assertTrue(any(x["code"] == "AAPL" for x in v["ok"]))
+        self.assertTrue(any(x["code"] == "NOTREALZZ" for x in v["bad"]))
+        self.assertIn("AAPL", saved["symbols"])
+        self.assertIn("BTCUSDT", saved["symbols"])
+        self.assertNotIn("NOTREALZZ", saved["symbols"])
+        self.assertEqual(saved["mode"], "override")
+        self.assertTrue(saved["rejected"])
+
+    def test_clear(self):
+        gp.save_override_symbols(["AAPL"])
+        out = self._req("POST", "api/global_pool/override", {"action": "clear"})
+        self.assertEqual(out["mode"], "default")
+        self.assertEqual(out["symbols"], [])
 
 
 if __name__ == "__main__":

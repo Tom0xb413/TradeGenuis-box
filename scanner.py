@@ -16,9 +16,9 @@
   股东户数 ：datacenter-web.eastmoney.com  备用 AKShare
   热点概念 ：push2.eastmoney.com clist + emweb F10  备用 AKShare（新浪概念 / 同花顺）
   全市场名单：东财 clist  备用新浪 sh_a+sz_a（不用 hs_a）  再备用 AKShare 官方名单
-  币圈 Tab ：USDT 永续 TOP20 + 黄金 + 美股指数 + 固定美股（见 global_pool.py）
-             Binance USDT 永续失败后粘性回退 Gate.io；美股/指数/部分黄金走 Yahoo chart
-             K 线周期 crypto_interval：4h | 8h | 1d（默认 1d）
+  全市场标的 Tab ：USDT 永续 TOP20 + 黄金 + 美/日/韩指数与龙头（见 global_pool.py）
+             Binance USDT 永续失败后粘性回退 Gate.io；股票/指数走 Sina/Naver（不依赖 Yahoo）
+             K 线周期 crypto_interval：4h | 8h | 1d（默认 1d；股票无 4h/8h 历史时回退日K）
 
 用法：
   pip install requests
@@ -73,12 +73,13 @@ from global_pool import (
     DEFAULT_CRYPTO_INTERVAL,
     GOLD_CRYPTO_SYMBOLS,
     GOLD_DISPLAY_NAME,
-    GOLD_YAHOO_SYMBOLS,
     build_global_pool,
-    fetch_yahoo_instrument,
     format_bar_date,
-    is_yahoo_symbol,
+    is_crypto_perp_symbol,
+    load_override_symbols,
     normalize_crypto_interval,
+    override_fingerprint,
+    resolve_symbol,
 )
 
 # --------------------------------------------------------------------------- #
@@ -91,8 +92,8 @@ WATCH_FILE = DATA / "watchlist.json"    # 扫描结果（自动生成）
 BJT = timezone(timedelta(hours=8))
 
 HOT_TOP_N = 10          # 热点概念板块取当日涨幅前 N 名（同时用于打分与板块筛选）
-# CRYPTO_TOP_N 定义在 global_pool.py（加密货币 Tab 涨幅榜取前 N，当前 20）
-CRYPTO_LOOKBACK = 200    # 币圈/全球池 K 线根数（随 crypto_interval 截取）
+# CRYPTO_TOP_N 定义在 global_pool.py（全市场标的 Tab 涨幅榜取前 N，当前 20）
+CRYPTO_LOOKBACK = 200    # 全球池 K 线根数（随 crypto_interval 截取）
 VOL_MULT = 1.8          # 倍量阈值（对前5日均量）
 VOL_DAYS_REQ = 3        # 连续放量最少天数
 FUND_DAYS = 5           # 资金流观察天数
@@ -1665,25 +1666,104 @@ def _gate_klines(symbol: str, limit: int, interval: str) -> list[dict]:
     return bars
 
 
+_crypto_ticker_cache: dict = {"ts": 0.0, "rows": [], "set": set()}
+
+
+def listed_crypto_symbols(ttl: float = 300.0) -> set[str]:
+    """缓存永续 ticker 代码集合，供覆盖池校验。失败返回上次成功结果或空集。"""
+    now = time.time()
+    if _crypto_ticker_cache["set"] and now - _crypto_ticker_cache["ts"] < ttl:
+        return set(_crypto_ticker_cache["set"])
+    try:
+        rows = fetch_crypto_tickers()
+        s = {norm_crypto_symbol(str(t.get("symbol") or "")) for t in rows or []}
+        s.discard("")
+        if s:
+            _crypto_ticker_cache["ts"] = now
+            _crypto_ticker_cache["rows"] = rows
+            _crypto_ticker_cache["set"] = s
+            return s
+    except Exception:
+        pass
+    return set(_crypto_ticker_cache["set"] or [])
+
+
+def crypto_symbol_is_listed(code: str) -> bool:
+    """覆盖池校验：代码在 24h ticker 中，或能拉到至少 1 根永续 K。"""
+    s = norm_crypto_symbol(code)
+    if not s:
+        return False
+    if s in listed_crypto_symbols():
+        return True
+    try:
+        bars = fetch_crypto_kline(s, limit=2, interval="1d")
+        return bool(bars)
+    except Exception:
+        return False
+
+
+def fetch_global_instrument(code: str, interval: str | None = None,
+                            lookback: int = CRYPTO_LOOKBACK,
+                            hint_source: str | None = None,
+                            hint_class: str | None = None) -> dict | None:
+    """
+    全市场标的 Tab 任意代码：永续/黄金走币所，股票指数走 equity_sources（Sina/Naver）。
+    股票 4h/8h 回退日K 并带 interval_note。失败返回 None。
+    """
+    iv = normalize_crypto_interval(interval or load_crypto_interval())
+    ident = resolve_symbol(code)
+    if hint_class and ident:
+        ident = dict(ident)
+        ident["asset_class"] = hint_class or ident["asset_class"]
+    cls = (ident or {}).get("asset_class") or hint_class or ""
+    src_hint = (hint_source or (ident or {}).get("source") or "").lower()
+    canon = (ident or {}).get("code") or norm_crypto_symbol(code) or code
+
+    if cls in ("crypto", "gold") or src_hint == "crypto" or (
+            not ident and is_crypto_perp_symbol(code)):
+        try:
+            bars = fetch_crypto_kline(canon, limit=lookback, interval=iv)
+        except Exception:
+            bars = []
+        if not bars:
+            return None
+        px = bars[-1]["close"]
+        chg = None
+        if len(bars) >= 2 and bars[-2]["close"]:
+            chg = (bars[-1]["close"] - bars[-2]["close"]) / bars[-2]["close"] * 100.0
+        name = GOLD_DISPLAY_NAME if cls == "gold" else ((ident or {}).get("name") or canon)
+        return {
+            "code": canon, "name": name, "price": px, "chg": chg,
+            "bars": bars, "source": "crypto",
+            "asset_class": cls or "crypto",
+            "interval": iv, "interval_note": None, "interval_limited": False,
+            "market": "crypto",
+        }
+
+    if not ident:
+        return None
+    try:
+        from equity_sources import fetch_equity_instrument
+        return fetch_equity_instrument(ident, interval=iv, lookback=lookback)
+    except Exception:
+        return None
+
+
 def fetch_tab_kline(code: str, interval: str | None = None,
                     source: str | None = None,
                     limit: int = CRYPTO_LOOKBACK) -> list[dict]:
-    """加密货币 Tab 内任意标的的 K 线：永续走币所，其余走 Yahoo。"""
-    iv = normalize_crypto_interval(interval or load_crypto_interval())
-    src = (source or "").lower()
-    if src == "yahoo" or (src != "crypto" and is_yahoo_symbol(code)):
-        inst = fetch_yahoo_instrument(code, interval=iv, lookback=limit)
-        return list((inst or {}).get("bars") or [])
-    return fetch_crypto_kline(code, limit=limit, interval=iv)
+    """全市场标的 Tab 内任意标的的 K 线：永续走币所，其余走 Sina/Naver。"""
+    inst = fetch_global_instrument(code, interval=interval, lookback=limit,
+                                   hint_source=source)
+    return list((inst or {}).get("bars") or [])
 
 
 def resolve_gold_instrument(tickers: list[dict] | None = None,
                             interval: str = "1d") -> dict | None:
     """
-    选 1 只黄金：先看 24h ticker 里的 XAUUSDT/PAXGUSDT，再探测永续 K 线，
-    最后 Yahoo GC=F / GLD。全部失败返回 None（扫描跳过黄金，不中止）。
+    选 1 只黄金：优先 Gate XAUT_USDT（ticker 或 K 线），再 XAUUSDT / PAXGUSDT。
+    全部失败返回 None（扫描跳过黄金，不中止）。不再把 Yahoo 当主路径。
     """
-    iv = normalize_crypto_interval(interval)
     ticker_map = {}
     for t in tickers or []:
         sym = norm_crypto_symbol(str(t.get("symbol") or t.get("code") or ""))
@@ -1709,18 +1789,6 @@ def resolve_gold_instrument(tickers: list[dict] | None = None,
                 "code": sym, "name": GOLD_DISPLAY_NAME,
                 "price": px, "chg": chg,
                 "asset_class": "gold", "market": "crypto", "source": "crypto",
-            }
-        except Exception:
-            continue
-    for ysym in GOLD_YAHOO_SYMBOLS:
-        try:
-            inst = fetch_yahoo_instrument(ysym, interval=iv, lookback=8)
-            if not inst or not inst.get("bars"):
-                continue
-            return {
-                "code": ysym, "name": GOLD_DISPLAY_NAME,
-                "price": inst.get("price"), "chg": inst.get("chg"),
-                "asset_class": "gold", "market": "crypto", "source": "yahoo",
             }
         except Exception:
             continue
@@ -1759,31 +1827,33 @@ def analyze_crypto(sym: str, price: float, chg: float,
 
 def run_crypto_scan(top: int = CRYPTO_TOP_N, workers: int | None = None,
                     progress=None) -> list[dict]:
-    """全球池扫描：币 TOP N + 黄金 + 指数 + 美股，复用箱体/旗形/趋势线引擎。"""
+    """全市场标的扫描：默认混合池或覆盖池，复用箱体/旗形/趋势线引擎。"""
     n_workers = resolve_scan_workers(workers)
     reset_crypto_backend()
     box_mode = load_box_mode()
     pattern_family = load_pattern_family()
     interval = load_crypto_interval()
+    override = load_override_symbols()
     emit_progress(progress, "拉取 USDT 永续 24h 行情（Binance，失败则 Gate.io）…",
                   phase="universe", done=0, total=0)
     tickers: list[dict] = []
     try:
         tickers = fetch_crypto_tickers()
     except Exception as e:
-        emit_progress(progress, f"永续行情失败，仅扫描黄金/指数/美股：{str(e)[:80]}",
+        emit_progress(progress, f"永续行情失败，仅扫描覆盖/黄金/指数/股票：{str(e)[:80]}",
                       phase="universe", done=0, total=0)
         tickers = []
     src = "Gate.io" if _crypto_backend == "gate" else "Binance"
     gold = resolve_gold_instrument(tickers, interval=interval)
-    pool = build_global_pool(tickers, top_n=top, gold=gold)
+    pool = build_global_pool(tickers, top_n=top, gold=gold, override_symbols=override or None)
     gold_note = ""
     if gold:
         gold_note = f"黄金 {gold.get('code')}({gold.get('source')})"
     else:
         gold_note = "黄金不可用（已跳过）"
-    emit_progress(progress, f"{src} TOP{min(top, len(tickers))} + {gold_note} + 指数/美股，"
-                  f"共 {len(pool)} 只，周期 {interval}，形态 {pattern_family}，"
+    pool_mode = "覆盖" if override else "默认"
+    emit_progress(progress, f"{src} {pool_mode}池 {len(pool)} 只 · {gold_note}，"
+                  f"周期 {interval}，形态 {pattern_family}，"
                   f"箱体 {box_mode}，开始扫描（{n_workers} 线程）…",
                   phase="analyze", done=0, total=len(pool))
 
@@ -1796,44 +1866,41 @@ def run_crypto_scan(top: int = CRYPTO_TOP_N, workers: int | None = None,
         nonlocal done, skipped
         code = item.get("code") or ""
         try:
-            source = item.get("source") or "crypto"
-            if source == "yahoo" or is_yahoo_symbol(code):
-                inst = fetch_yahoo_instrument(code, interval=interval, lookback=CRYPTO_LOOKBACK)
-                if not inst:
-                    with lock:
-                        skipped += 1
-                    return None
-                bars = inst.get("bars") or []
-                name = item.get("name") if item.get("asset_class") in ("gold", "us_index") else (inst.get("name") or item.get("name") or code)
-                if item.get("asset_class") == "gold":
-                    name = GOLD_DISPLAY_NAME
-                px = inst.get("price") if inst.get("price") is not None else item.get("price")
-                chg = inst.get("chg") if inst.get("chg") is not None else item.get("chg")
-                if px is None and bars:
-                    px = bars[-1]["close"]
-                if chg is None and len(bars) >= 2 and bars[-2]["close"]:
-                    chg = (bars[-1]["close"] - bars[-2]["close"]) / bars[-2]["close"] * 100.0
-                return analyze_crypto(
-                    code, float(px or 0), float(chg or 0), bars, box_mode=box_mode,
-                    name=name, asset_class=item.get("asset_class") or "us_stock",
-                    source="yahoo",
-                )
-            bars = fetch_crypto_kline(code, limit=CRYPTO_LOOKBACK, interval=interval)
-            px = item.get("price")
-            chg = item.get("chg")
+            inst = fetch_global_instrument(
+                code, interval=interval, lookback=CRYPTO_LOOKBACK,
+                hint_source=item.get("source"),
+                hint_class=item.get("asset_class"),
+            )
+            if not inst:
+                with lock:
+                    skipped += 1
+                return None
+            bars = inst.get("bars") or []
+            name = item.get("name") or inst.get("name") or code
+            if item.get("asset_class") == "gold" or inst.get("asset_class") == "gold":
+                name = GOLD_DISPLAY_NAME
+            px = inst.get("price")
+            if px is None:
+                px = item.get("price")
+            chg = inst.get("chg")
+            if chg is None:
+                chg = item.get("chg")
             if px is None and bars:
                 px = bars[-1]["close"]
             if chg is None and len(bars) >= 2 and bars[-2]["close"]:
                 chg = (bars[-1]["close"] - bars[-2]["close"]) / bars[-2]["close"] * 100.0
             row = analyze_crypto(
                 code, float(px or 0), float(chg or 0), bars, box_mode=box_mode,
-                name=item.get("name") or code,
-                asset_class=item.get("asset_class") or "crypto",
-                source="crypto",
+                name=name,
+                asset_class=item.get("asset_class") or inst.get("asset_class") or "crypto",
+                source=inst.get("source") or item.get("source") or "equity",
             )
             if row is None:
                 with lock:
                     skipped += 1
+            elif inst.get("interval_note"):
+                row["interval_note"] = inst["interval_note"]
+                row["interval_limited"] = True
             return row
         except Exception:
             with lock:
@@ -1843,7 +1910,7 @@ def run_crypto_scan(top: int = CRYPTO_TOP_N, workers: int | None = None,
             with lock:
                 done += 1
                 n_done = done
-            emit_progress(progress, f"全球池扫描 {n_done}/{n_pool}",
+            emit_progress(progress, f"全市场标的扫描 {n_done}/{n_pool}",
                           phase="analyze", done=n_done, total=n_pool)
 
     if n_pool:
@@ -1875,6 +1942,9 @@ def run_crypto_scan(top: int = CRYPTO_TOP_N, workers: int | None = None,
         "box_mode": box_mode,
         "pattern_family": pattern_family,
         "crypto_interval": interval,
+        "pool_mode": "override" if override else "default",
+        "override_symbols": list(override or []),
+        "override_fingerprint": override_fingerprint(override),
         "hot_topics": [],
         "candidates": rows,
         "source": "gate" if _crypto_backend == "gate" else "binance",
@@ -1884,11 +1954,15 @@ def run_crypto_scan(top: int = CRYPTO_TOP_N, workers: int | None = None,
             "gold": _count("gold"),
             "us_index": _count("us_index"),
             "us_stock": _count("us_stock"),
+            "jp_index": _count("jp_index"),
+            "jp_stock": _count("jp_stock"),
+            "kr_index": _count("kr_index"),
+            "kr_stock": _count("kr_stock"),
         },
     })
     DATA.mkdir(parents=True, exist_ok=True)
     CRYPTO_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    emit_progress(progress, f"全球池完成：有效 {len(rows)} 只（跳过 {skipped}），"
+    emit_progress(progress, f"全市场标的完成：有效 {len(rows)} 只（跳过 {skipped}），"
                   f"达标 {sum(1 for r in rows if r.get('qualified'))} 只，周期 {interval}",
                   phase="save", done=n_pool, total=n_pool)
     return rows
@@ -2006,7 +2080,7 @@ def main() -> int:
     ap.add_argument("--market", action="store_true",
                     help="全市场扫描：沪深全部 A 股逐一深度计算（无粗筛）")
     ap.add_argument("--crypto", action="store_true",
-                    help="全球池扫描：USDT 永续 24h 涨幅前 N + 黄金 + 美股指数/个股，箱体逻辑复用")
+                    help="全市场标的扫描：USDT 永续 24h 涨幅前 N + 黄金 + 美/日/韩指数与龙头，箱体逻辑复用")
     ap.add_argument("--quick", action="store_true",
                     help="快扫模式：量比粗筛 TOP N 后深度计算（仅配合 --market）")
     ap.add_argument("--top", type=int, default=MARKET_TOP,
