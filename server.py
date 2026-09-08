@@ -699,6 +699,8 @@ def get_kline(code: str, lmt: int = 160, market: str = "stock") -> dict | None:
                 "interval_limited": bool((inst or {}).get("interval_limited")),
                 "source": (inst or {}).get("source"),
                 "asset_class": (inst or {}).get("asset_class"),
+                "tokenized": bool((inst or {}).get("tokenized")),
+                "gate_contract": (inst or {}).get("gate_contract"),
             }
         else:
             quote = sc.fetch_quote(code)
@@ -872,7 +874,8 @@ class Handler(BaseHTTPRequestHandler):
                 symbols = [str(x).strip() for x in raw if str(x).strip()]
             else:
                 symbols = []
-            self._json(gp.validate_symbols(symbols, crypto_ok=sc.crypto_symbol_is_listed))
+            self._json(gp.validate_symbols(symbols, crypto_ok=sc.crypto_symbol_is_listed,
+                                           gate_ok=sc.gate_contract_is_listed))
         elif p == "/api/global_pool/override":
             body = self._body()
             action = str(body.get("action") or "").lower()
@@ -888,7 +891,8 @@ class Handler(BaseHTTPRequestHandler):
                 symbols = [str(x).strip() for x in raw if str(x).strip()]
             else:
                 symbols = []
-            result = gp.validate_symbols(symbols, crypto_ok=sc.crypto_symbol_is_listed)
+            result = gp.validate_symbols(symbols, crypto_ok=sc.crypto_symbol_is_listed,
+                                         gate_ok=sc.gate_contract_is_listed)
             ok_codes = [x["code"] for x in result["ok"]]
             gp.save_override_symbols(ok_codes)
             log("覆盖池已保存 %s 只%s" % (

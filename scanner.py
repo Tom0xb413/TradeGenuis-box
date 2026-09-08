@@ -17,7 +17,7 @@
   热点概念 ：push2.eastmoney.com clist + emweb F10  备用 AKShare（新浪概念 / 同花顺）
   全市场名单：东财 clist  备用新浪 sh_a+sz_a（不用 hs_a）  再备用 AKShare 官方名单
   全市场标的 Tab ：USDT 永续 TOP20 + 黄金 + 美/日/韩指数与龙头（见 global_pool.py）
-             Binance USDT 永续失败后粘性回退 Gate.io；股票/指数走 Sina/Naver（不依赖 Yahoo）
+             Binance USDT 永续失败后粘性回退 Gate.io；有 Gate 股票代币则走代币 K 线（非官方正股），否则 Sina/Naver 日K
              K 线周期 crypto_interval：4h | 8h | 1d（默认 1d；股票无 4h/8h 历史时回退日K）
 
 用法：
@@ -75,6 +75,8 @@ from global_pool import (
     GOLD_DISPLAY_NAME,
     build_global_pool,
     format_bar_date,
+    gate_contract_for,
+    guess_us_gate_contract,
     is_crypto_perp_symbol,
     load_override_symbols,
     normalize_crypto_interval,
@@ -1640,8 +1642,24 @@ def _binance_klines(symbol: str, limit: int, interval: str) -> list[dict]:
 def _gate_klines(symbol: str, limit: int, interval: str) -> list[dict]:
     # Gate USDT 永续 candlesticks 与 Binance 一样使用 4h / 8h / 1d 字符串（另有 1h、1m 等）
     iv = normalize_crypto_interval(interval)
+    return fetch_gate_equity_klines(gate_contract(symbol), limit, iv)
+
+
+def fetch_gate_equity_klines(contract: str, limit: int = CRYPTO_LOOKBACK,
+                             interval: str = "1d") -> list[dict]:
+    """
+    直接拉 Gate USDT 永续 K 线，不经过 Binance、不改粘性后端。
+    股票代币必须走这条路径，避免 AAPL 打 Binance 失败后把整轮扫进 Gate。
+    contract 形如 AAPL_USDT / SPX500_USDT。
+    """
+    iv = normalize_crypto_interval(interval)
+    name = (contract or "").strip()
+    if not name:
+        return []
+    if "_" not in name and name.upper().endswith("USDT") and len(name) > 4:
+        name = gate_contract(name)
     d = http_json(
-        f"{GATE_FUTURES}/candlesticks?contract={gate_contract(symbol)}"
+        f"{GATE_FUTURES}/candlesticks?contract={name}"
         f"&interval={iv}&limit={limit}",
         timeout=15,
     )
@@ -1664,6 +1682,46 @@ def _gate_klines(symbol: str, limit: int, interval: str) -> list[dict]:
             continue
     bars.sort(key=lambda b: b["date"])
     return bars
+
+
+_gate_contract_cache: dict = {"ts": 0.0, "names": set()}
+
+
+def listed_gate_contracts(ttl: float = 600.0) -> set[str]:
+    """Gate USDT 永续合约名集合（AAPL_USDT）。失败返回上次成功结果。"""
+    now = time.time()
+    if _gate_contract_cache["names"] and now - _gate_contract_cache["ts"] < ttl:
+        return set(_gate_contract_cache["names"])
+    try:
+        rows = http_json(f"{GATE_FUTURES}/contracts", timeout=15)
+        names = set()
+        for c in rows or []:
+            n = str((c or {}).get("name") or "").strip()
+            if n and not (c or {}).get("in_delisting"):
+                names.add(n)
+        if names:
+            _gate_contract_cache["ts"] = now
+            _gate_contract_cache["names"] = names
+            return set(names)
+    except Exception:
+        pass
+    return set(_gate_contract_cache["names"] or [])
+
+
+def gate_contract_is_listed(contract: str) -> bool:
+    """覆盖池：合约在 Gate 永续列表中，或能拉到至少 1 根 K。"""
+    name = (contract or "").strip()
+    if not name:
+        return False
+    if "_" not in name and name.upper().endswith("USDT"):
+        name = gate_contract(name)
+    if name in listed_gate_contracts():
+        return True
+    try:
+        bars = fetch_gate_equity_klines(name, limit=2, interval="1d")
+        return bool(bars)
+    except Exception:
+        return False
 
 
 _crypto_ticker_cache: dict = {"ts": 0.0, "rows": [], "set": set()}
@@ -1707,8 +1765,9 @@ def fetch_global_instrument(code: str, interval: str | None = None,
                             hint_source: str | None = None,
                             hint_class: str | None = None) -> dict | None:
     """
-    全市场标的 Tab 任意代码：永续/黄金走币所，股票指数走 equity_sources（Sina/Naver）。
-    股票 4h/8h 回退日K 并带 interval_note。失败返回 None。
+    全市场标的 Tab 任意代码：永续/黄金走币所；
+    股票/指数优先 Gate 股票代币（原生 4h/8h/1d），无代币或失败再 Sina/Naver 日K。
+    失败返回 None。
     """
     iv = normalize_crypto_interval(interval or load_crypto_interval())
     ident = resolve_symbol(code)
@@ -1737,11 +1796,37 @@ def fetch_global_instrument(code: str, interval: str | None = None,
             "bars": bars, "source": "crypto",
             "asset_class": cls or "crypto",
             "interval": iv, "interval_note": None, "interval_limited": False,
+            "tokenized": False,
             "market": "crypto",
         }
 
     if not ident:
         return None
+
+    contract = (ident.get("gate_contract") or gate_contract_for(canon)
+                or (guess_us_gate_contract(canon) if cls == "us_stock" else None))
+    if contract:
+        try:
+            bars = fetch_gate_equity_klines(contract, limit=lookback, interval=iv)
+        except Exception:
+            bars = []
+        if bars:
+            px = bars[-1]["close"]
+            chg = None
+            if len(bars) >= 2 and bars[-2]["close"]:
+                chg = (bars[-1]["close"] - bars[-2]["close"]) / bars[-2]["close"] * 100.0
+            return {
+                "code": canon,
+                "name": ident.get("name") or canon,
+                "price": px, "chg": chg,
+                "bars": bars, "source": "gate",
+                "asset_class": cls or "us_stock",
+                "interval": iv, "interval_note": None, "interval_limited": False,
+                "tokenized": True,
+                "gate_contract": contract,
+                "market": "crypto",
+            }
+
     try:
         from equity_sources import fetch_equity_instrument
         return fetch_equity_instrument(ident, interval=iv, lookback=lookback)
@@ -1752,7 +1837,7 @@ def fetch_global_instrument(code: str, interval: str | None = None,
 def fetch_tab_kline(code: str, interval: str | None = None,
                     source: str | None = None,
                     limit: int = CRYPTO_LOOKBACK) -> list[dict]:
-    """全市场标的 Tab 内任意标的的 K 线：永续走币所，其余走 Sina/Naver。"""
+    """全市场标的 Tab 内任意标的的 K 线：永续/股票代币走 Gate，其余走 Sina/Naver。"""
     inst = fetch_global_instrument(code, interval=interval, lookback=limit,
                                    hint_source=source)
     return list((inst or {}).get("bars") or [])
@@ -1798,7 +1883,8 @@ def resolve_gold_instrument(tickers: list[dict] | None = None,
 def analyze_crypto(sym: str, price: float, chg: float,
                    bars: list[dict], box_mode: str | None = None,
                    *, name: str | None = None, asset_class: str = "crypto",
-                   source: str = "crypto") -> dict | None:
+                   source: str = "crypto", tokenized: bool = False,
+                   gate_contract: str | None = None) -> dict | None:
     """复用同一套箱体/倍量/试盘引擎。market 仍为 crypto（看板 Tab）；asset_class 区分币/金/指数/美股。"""
     if len(bars) < 40:
         return None
@@ -1809,6 +1895,7 @@ def analyze_crypto(sym: str, price: float, chg: float,
         "code": sym, "name": name or sym, "market": "crypto",
         "asset_class": asset_class or "crypto",
         "source": source or "crypto",
+        "tokenized": bool(tokenized),
         "price": price, "chg": chg,
         "turnover": None, "volume_ratio": vol["volume_ratio"],
         "volume_days": vol["volume_days"],
@@ -1822,6 +1909,8 @@ def analyze_crypto(sym: str, price: float, chg: float,
         "bar_date": bars[-1]["date"],
         "as_of_quote": now_str(),
     }
+    if gate_contract:
+        row["gate_contract"] = gate_contract
     return score_row(row)
 
 
@@ -1894,6 +1983,8 @@ def run_crypto_scan(top: int = CRYPTO_TOP_N, workers: int | None = None,
                 name=name,
                 asset_class=item.get("asset_class") or inst.get("asset_class") or "crypto",
                 source=inst.get("source") or item.get("source") or "equity",
+                tokenized=bool(inst.get("tokenized") or item.get("tokenized")),
+                gate_contract=inst.get("gate_contract") or item.get("gate_contract"),
             )
             if row is None:
                 with lock:

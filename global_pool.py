@@ -9,8 +9,9 @@
   - 美/日/韩指数 + 固定美股大盘 + 少量日韩龙头
 
 K 线周期 crypto_interval ∈ {4h, 8h, 1d}，默认 1d。
-股票/指数在国内 VPS 走 Sina / Naver（见 equity_sources.py），不依赖 Yahoo。
-Yahoo 仅作遗留函数保留（本机 VPN 下 1h 仍可用）；扫描主路径不再 Yahoo-first。
+有 Gate 股票代币的标的主路径走 Gate 永续（原生 4h/8h/1d，与币相同）；
+无代币时才回退 Sina / Naver 日K（见 equity_sources.py）。代币跟踪正股但存在基差，不是交易所官方打印。
+Yahoo 仅作遗留函数保留；扫描主路径不再 Yahoo-first。
 覆盖池非空时扫描只扫用户标的，见 data/global_override_pool.json。
 """
 from __future__ import annotations
@@ -75,6 +76,109 @@ KR_STOCKS: tuple[dict, ...] = (
     {"symbol": "005930", "name": "三星电子"},
     {"symbol": "000660", "name": "SK海力士"},
 )
+
+# Gate.io USDT 永续股票代币（2026-09 VPS/本环境实测）。值是合约名。
+# 这是代币、可能与正股有基差；不是纽交所/东证/韩交所官方行情。
+# 未列入的标的（Mastercard MA、纳指综合 .IXIC、日经 NKY、KOSPI/KOSDAQ）仍走 Sina/Naver 日K。
+# 不映射 JPN225_USDT：报价约 427，与日经 6 万点不是同一标尺。
+GATE_EQUITY_MAP: dict[str, str] = {
+    "AAPL": "AAPL_USDT", "MSFT": "MSFT_USDT", "NVDA": "NVDA_USDT",
+    "GOOGL": "GOOGL_USDT", "AMZN": "AMZN_USDT", "META": "META_USDT",
+    "TSLA": "TSLA_USDT", "BRK-B": "BRKB_USDT", "JPM": "JPM_USDT",
+    "V": "V_USDT", "UNH": "UNH_USDT", "XOM": "XOM_USDT",
+    "JNJ": "JNJ_USDT", "WMT": "WMT_USDT", "PG": "PG_USDT",
+    "HD": "HD_USDT", "COST": "COST_USDT", "AVGO": "AVGO_USDT",
+    "NFLX": "NFLX_USDT",
+    ".INX": "SPX500_USDT",   # 勿用 SPX_USDT（报价约 0.53，不是标普）
+    ".DJI": "US30_USDT",
+    ".NDX": "NAS100_USDT",
+    "7203.T": "TM_USDT",     # 丰田 ADR 代币
+    "6758.T": "SONY_USDT",
+    "005930": "SAMSUNG_USDT",
+    "000660": "SKHYNIX_USDT",
+}
+
+# 覆盖池可解析、但不进默认宇宙的 Gate 代币（ETF 等）。
+GATE_EXTRA_EQUITY: dict[str, tuple[str, str, str]] = {
+    "SPY": ("SPY_USDT", "SPY", "us_stock"),
+    "QQQ": ("QQQ_USDT", "QQQ", "us_stock"),
+}
+
+
+def _build_gate_aliases() -> dict[str, str]:
+    """AAPL_USDT / TM / SPX500 / SAMSUNG → 规范代码。"""
+    out: dict[str, str] = {}
+    def add(alias: str, code: str) -> None:
+        if not alias:
+            return
+        out[alias] = code
+        out[alias.upper()] = code
+        compact = alias.replace("_", "").replace("-", "")
+        out[compact] = code
+        out[compact.upper()] = code
+
+    for code, contract in GATE_EQUITY_MAP.items():
+        add(contract, code)
+        base = contract[:-5] if contract.endswith("_USDT") else contract
+        add(base, code)
+    for code, (contract, _name, _cls) in GATE_EXTRA_EQUITY.items():
+        add(code, code)
+        add(contract, code)
+        base = contract[:-5] if contract.endswith("_USDT") else contract
+        add(base, code)
+    return out
+
+
+_GATE_ALIASES = _build_gate_aliases()
+_GATE_ALIASES["SPX_USDT"] = ".INX"
+_GATE_ALIASES["SPXUSDT"] = ".INX"
+
+
+def gate_contract_for(code: str) -> str | None:
+    """规范代码 → Gate 合约。无映射返回 None（调用方再猜美股 {TICKER}_USDT 或走 Sina）。"""
+    if not code:
+        return None
+    if code in GATE_EQUITY_MAP:
+        return GATE_EQUITY_MAP[code]
+    extra = GATE_EXTRA_EQUITY.get(code)
+    if extra:
+        return extra[0]
+    return None
+
+
+def guess_us_gate_contract(code: str) -> str | None:
+    """美股 ticker → 候选合约：BRK-B → BRKB_USDT，AAPL → AAPL_USDT。"""
+    raw = (code or "").strip()
+    if not raw or raw.startswith(".") or raw.endswith(".T") or raw[:1].isdigit():
+        return None
+    s = raw.replace("-", "").replace(".", "").upper()
+    if s.endswith("USDT") and len(s) > 4:
+        s = s[:-4]
+    if not re.fullmatch(r"[A-Z]{1,6}", s):
+        return None
+    return f"{s}_USDT"
+
+
+def gate_equity_norm_set() -> set[str]:
+    """涨幅榜应排除的股票代币（规范化无下划线）。"""
+    out = {_norm_crypto(v) for v in GATE_EQUITY_MAP.values()}
+    out |= {_norm_crypto(v[0]) for v in GATE_EXTRA_EQUITY.values()}
+    return out
+
+
+def _with_gate(ident: dict | None) -> dict | None:
+    """给 ident 打上 gate_contract / tokenized；有静态映射则 source=gate。"""
+    if not ident:
+        return ident
+    if ident.get("asset_class") in ("crypto", "gold"):
+        return ident
+    g = ident.get("gate_contract") or gate_contract_for(ident.get("code") or "")
+    if g:
+        ident["gate_contract"] = g
+        ident["tokenized"] = True
+        ident["source"] = "gate"
+    return ident
+
 
 YAHOO_TIMEOUT = 10.0
 YAHOO_CHART_HOSTS = (
@@ -185,26 +289,30 @@ def _lookup_static(code: str) -> dict | None:
     """默认池常量里的展示名 / 元数据。"""
     for idx in US_INDICES:
         if idx["symbol"] == code:
-            return _ident(code, idx["name"], "us_index", "sina",
+            return _with_gate(_ident(code, idx["name"], "us_index", "sina",
                           sina_symbol=idx.get("sina_symbol") or code,
-                          znb=idx.get("znb"), known=True)
+                          znb=idx.get("znb"), known=True))
     for idx in JP_INDICES:
         if idx["symbol"] == code:
-            return _ident(code, idx["name"], "jp_index", "sina",
-                          sina_gi=idx.get("sina_gi") or "NKY", known=True)
+            return _with_gate(_ident(code, idx["name"], "jp_index", "sina",
+                          sina_gi=idx.get("sina_gi") or "NKY", known=True))
     for idx in KR_INDICES:
         if idx["symbol"] == code:
-            return _ident(code, idx["name"], "kr_index", "naver",
-                          naver_code=idx.get("naver_code") or code, known=True)
+            return _with_gate(_ident(code, idx["name"], "kr_index", "naver",
+                          naver_code=idx.get("naver_code") or code, known=True))
     for stk in JP_STOCKS:
         if stk["symbol"].upper() == code.upper():
-            return _ident(stk["symbol"], stk["name"], "jp_stock", "naver",
-                          naver_code=stk["symbol"], known=True)
+            return _with_gate(_ident(stk["symbol"], stk["name"], "jp_stock", "naver",
+                          naver_code=stk["symbol"], known=True))
     for stk in KR_STOCKS:
         if stk["symbol"] == code:
-            return _ident(code, stk["name"], "kr_stock", "naver", known=True)
+            return _with_gate(_ident(code, stk["name"], "kr_stock", "naver", known=True))
     if code in US_STOCKS:
-        return _ident(code, code, "us_stock", "sina", known=True)
+        return _with_gate(_ident(code, code, "us_stock", "sina", known=True))
+    extra = GATE_EXTRA_EQUITY.get(code)
+    if extra:
+        contract, name, cls = extra
+        return _with_gate(_ident(code, name, cls, "gate", known=True, gate_contract=contract))
     if code in GOLD_CRYPTO_SYMBOLS:
         return _ident(code, GOLD_DISPLAY_NAME, "gold", "crypto", known=True)
     return None
@@ -213,17 +321,24 @@ def _lookup_static(code: str) -> dict | None:
 def resolve_symbol(raw: str) -> dict | None:
     """
     把用户输入规范为内部 ident。
-    例：AAPL、7203.T、005930、.INX、日经225指数、BTCUSDT、黄金。
+    例：AAPL、AAPL_USDT、7203.T、TM、005930、SAMSUNG、.INX、SPX500、日经225指数、BTCUSDT、黄金。
     无法归类则返回 None（校验层报「未知标的」）。
     """
     s = (raw or "").strip()
     if not s:
         return None
     alias_key = s if s in _INDEX_ALIAS else s.upper().replace(" ", "")
+    compact = _norm_crypto(s) if not s.startswith(".") else s.upper()
     if s in _INDEX_ALIAS:
         s = _INDEX_ALIAS[s]
     elif alias_key in _INDEX_ALIAS:
         s = _INDEX_ALIAS[alias_key]
+    elif s in _GATE_ALIASES:
+        s = _GATE_ALIASES[s]
+    elif alias_key in _GATE_ALIASES:
+        s = _GATE_ALIASES[alias_key]
+    elif compact in _GATE_ALIASES:
+        s = _GATE_ALIASES[compact]
     else:
         s = s.strip()
 
@@ -234,31 +349,30 @@ def resolve_symbol(raw: str) -> dict | None:
     cu = _norm_crypto(s)
     if cu in GOLD_CRYPTO_SYMBOLS:
         return _ident(cu, GOLD_DISPLAY_NAME, "gold", "crypto", known=True)
+    # 股票代币必须在「当加密永续」之前识别，避免 AAPLUSDT 被收成币
     if is_crypto_perp_symbol(s) and cu not in GOLD_CRYPTO_SYMBOLS:
         return _ident(cu, cu, "crypto", "crypto")
 
     up = s.upper()
     if re.fullmatch(r"\d{3,5}\.T", up):
         digits = up[:-2]
-        return _ident(f"{digits}.T", f"{digits}.T", "jp_stock", "naver",
-                      naver_code=f"{digits}.T")
+        return _with_gate(_ident(f"{digits}.T", f"{digits}.T", "jp_stock", "naver",
+                      naver_code=f"{digits}.T"))
     if re.fullmatch(r"\d{4}", s):
-        return _ident(f"{s}.T", f"{s}.T", "jp_stock", "naver", naver_code=f"{s}.T")
+        return _with_gate(_ident(f"{s}.T", f"{s}.T", "jp_stock", "naver", naver_code=f"{s}.T"))
     if re.fullmatch(r"\d{6}", s):
-        return _ident(s, s, "kr_stock", "naver")
+        return _with_gate(_ident(s, s, "kr_stock", "naver"))
 
     if up in (".INX", ".DJI", ".IXIC", ".NDX"):
         names = {".INX": "标普500", ".DJI": "道指", ".IXIC": "纳指", ".NDX": "纳斯达克100"}
         znb = {".INX": "SPX", ".DJI": "DJI", ".IXIC": "IXIC", ".NDX": "NDX"}
-        return _ident(up, names[up], "us_index", "sina", sina_symbol=up, znb=znb[up], known=True)
+        return _with_gate(_ident(up, names[up], "us_index", "sina", sina_symbol=up, znb=znb[up], known=True))
 
     # 美股 ticker：1–5 字母，可选 -B / .B
     us = up.replace(".", "-")
     if re.fullmatch(r"[A-Z]{1,5}(?:-[A-Z])?", us):
         code = us
-        if code.endswith("-B") and code.count("-") == 1:
-            pass
-        return _ident(code, code, "us_stock", "sina")
+        return _with_gate(_ident(code, code, "us_stock", "sina"))
     return None
 
 
@@ -319,10 +433,11 @@ def clear_override_symbols() -> None:
     save_override_symbols([])
 
 
-def validate_symbol(code: str, crypto_ok=None) -> dict:
+def validate_symbol(code: str, crypto_ok=None, gate_ok=None) -> dict:
     """
     校验单只标的。返回 {ok, code, name, asset_class, source, reason}。
     crypto_ok(canonical) 用于永续是否在交易所 ticker 列表；黄金常量直接通过。
+    gate_ok(contract) 用于 Gate 股票代币合约是否存在；有静态映射时可免于探活。
     """
     raw = (code or "").strip()
     ident = resolve_symbol(raw)
@@ -330,9 +445,14 @@ def validate_symbol(code: str, crypto_ok=None) -> dict:
         return {"ok": False, "code": raw, "name": raw, "asset_class": "",
                 "source": "", "reason": "未知标的"}
     cls = ident["asset_class"]
+    keys = ("code", "name", "asset_class", "source")
+    extra = {}
+    if ident.get("gate_contract"):
+        extra["gate_contract"] = ident["gate_contract"]
+    if ident.get("tokenized"):
+        extra["tokenized"] = True
     if cls == "gold":
-        return {"ok": True, "reason": "", **{k: ident[k] for k in
-                ("code", "name", "asset_class", "source")}}
+        return {"ok": True, "reason": "", **{k: ident[k] for k in keys}, **extra}
     if cls == "crypto":
         ok = True
         reason = ""
@@ -343,18 +463,34 @@ def validate_symbol(code: str, crypto_ok=None) -> dict:
                 ok = False
             if not ok:
                 reason = "永续合约列表中不存在"
-        return {"ok": ok, "reason": reason, **{k: ident[k] for k in
-                ("code", "name", "asset_class", "source")}}
+        return {"ok": ok, "reason": reason, **{k: ident[k] for k in keys}, **extra}
+
+    contract = ident.get("gate_contract") or gate_contract_for(ident["code"])
+    mapped = bool(gate_contract_for(ident["code"]))
+    if mapped and contract:
+        return {"ok": True, "reason": "", "code": ident["code"], "name": ident["name"],
+                "asset_class": cls, "source": "gate", "tokenized": True,
+                "gate_contract": contract}
+    if not contract and cls == "us_stock":
+        contract = guess_us_gate_contract(ident["code"])
+    if contract and gate_ok is not None:
+        try:
+            if gate_ok(contract):
+                return {"ok": True, "reason": "", "code": ident["code"], "name": ident["name"],
+                        "asset_class": cls, "source": "gate", "tokenized": True,
+                        "gate_contract": contract}
+        except Exception:
+            pass
+
     try:
         from equity_sources import validate_equity
         ok, reason = validate_equity(ident)
     except Exception as e:
         ok, reason = (True, "") if ident.get("known") else (False, str(e)[:80])
-    return {"ok": ok, "reason": reason, **{k: ident[k] for k in
-            ("code", "name", "asset_class", "source")}}
+    return {"ok": ok, "reason": reason, **{k: ident[k] for k in keys}, **extra}
 
 
-def validate_symbols(symbols: list[str], crypto_ok=None) -> dict:
+def validate_symbols(symbols: list[str], crypto_ok=None, gate_ok=None) -> dict:
     """批量校验。ok[] 为通过项，bad[] 为 {code, reason}。"""
     ok_rows, bad_rows, seen = [], [], set()
     for raw in symbols or []:
@@ -365,9 +501,14 @@ def validate_symbols(symbols: list[str], crypto_ok=None) -> dict:
         if key in seen:
             continue
         seen.add(key)
-        row = validate_symbol(s, crypto_ok=crypto_ok)
+        row = validate_symbol(s, crypto_ok=crypto_ok, gate_ok=gate_ok)
         if row.get("ok"):
-            ok_rows.append({k: row[k] for k in ("code", "name", "asset_class", "source")})
+            payload = {k: row[k] for k in ("code", "name", "asset_class", "source") if k in row}
+            if row.get("gate_contract"):
+                payload["gate_contract"] = row["gate_contract"]
+            if row.get("tokenized"):
+                payload["tokenized"] = True
+            ok_rows.append(payload)
         else:
             bad_rows.append({"code": s, "reason": row.get("reason") or "无法解析"})
     return {"ok": ok_rows, "bad": bad_rows}
@@ -465,7 +606,7 @@ def resample_ohlc_hours(bars: list[dict], hours: int) -> list[dict]:
 # --------------------------------------------------------------------------- #
 def _pool_item(code: str, name: str, asset_class: str, source: str,
                price=None, chg=None) -> dict:
-    return {
+    item = {
         "code": code,
         "name": name or code,
         "price": price,
@@ -474,6 +615,12 @@ def _pool_item(code: str, name: str, asset_class: str, source: str,
         "market": "crypto",  # 仍走全市场标的 Tab / /api/crypto / kline market=crypto
         "source": source,
     }
+    g = gate_contract_for(code)
+    if g and asset_class not in ("crypto", "gold"):
+        item["gate_contract"] = g
+        item["tokenized"] = True
+        item["source"] = "gate"
+    return item
 
 
 def _ident_to_pool_item(ident: dict, ticker_map: dict | None = None) -> dict:
@@ -486,9 +633,11 @@ def _ident_to_pool_item(ident: dict, ticker_map: dict | None = None) -> dict:
     if t:
         item["price"] = t.get("price")
         item["chg"] = t.get("chg")
-    for k in ("sina_symbol", "naver_code", "znb", "sina_gi"):
+    for k in ("sina_symbol", "naver_code", "znb", "sina_gi", "gate_contract"):
         if ident.get(k):
             item[k] = ident[k]
+    if ident.get("tokenized"):
+        item["tokenized"] = True
     return item
 
 
@@ -539,6 +688,7 @@ def build_global_pool(crypto_tickers: list[dict], top_n: int = CRYPTO_TOP_N,
     gold_codes = set(GOLD_CRYPTO_SYMBOLS)
     if gold and gold.get("code"):
         gold_codes.add(str(gold["code"]))
+    equity_gate = gate_equity_norm_set()
 
     pool: list[dict] = []
     seen: set[str] = set()
@@ -555,7 +705,7 @@ def build_global_pool(crypto_tickers: list[dict], top_n: int = CRYPTO_TOP_N,
         if taken >= n:
             break
         sym = _norm_crypto(str(t.get("symbol") or t.get("code") or ""))
-        if not sym or sym in gold_codes:
+        if not sym or sym in gold_codes or sym in equity_gate:
             continue
         add(_pool_item(
             sym, sym, "crypto", "crypto",

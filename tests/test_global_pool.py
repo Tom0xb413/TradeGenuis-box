@@ -160,6 +160,25 @@ class PoolBuilderTest(unittest.TestCase):
         self.assertIn("7203.T", {x["code"] for x in by["jp_stock"]})
         self.assertIn("005930", {x["code"] for x in by["kr_stock"]})
         self.assertTrue(all(x["source"] != "yahoo" for x in pool if x["asset_class"] != "crypto"))
+        self.assertEqual(gp.gate_contract_for("AAPL"), "AAPL_USDT")
+        self.assertEqual(gp.gate_contract_for(".INX"), "SPX500_USDT")
+        self.assertEqual(gp.gate_contract_for(".DJI"), "US30_USDT")
+        self.assertEqual(gp.gate_contract_for(".NDX"), "NAS100_USDT")
+        self.assertIsNone(gp.gate_contract_for(".IXIC"))
+        self.assertIsNone(gp.gate_contract_for("MA"))
+        self.assertIsNone(gp.gate_contract_for("NKY"))
+        self.assertIsNone(gp.gate_contract_for("KOSPI"))
+        aapl = next(x for x in by["us_stock"] if x["code"] == "AAPL")
+        self.assertTrue(aapl.get("tokenized"))
+        self.assertEqual(aapl["source"], "gate")
+        self.assertEqual(aapl["gate_contract"], "AAPL_USDT")
+        ma = next(x for x in by["us_stock"] if x["code"] == "MA")
+        self.assertFalse(ma.get("tokenized"))
+        self.assertEqual(ma["source"], "sina")
+        nky = next(x for x in by["jp_index"] if x["code"] == "NKY")
+        self.assertEqual(nky["source"], "sina")
+        self.assertEqual(next(x for x in by["jp_stock"] if x["code"] == "7203.T")["gate_contract"], "TM_USDT")
+        self.assertEqual(next(x for x in by["kr_stock"] if x["code"] == "005930")["gate_contract"], "SAMSUNG_USDT")
 
     def test_gold_perp_not_counted_in_topn(self):
         tickers = [{"symbol": "XAUUSDT", "price": 1, "chg": 99}] + _tickers(20)
@@ -211,6 +230,15 @@ class PoolBuilderTest(unittest.TestCase):
         self.assertEqual(gp.resolve_symbol("005930")["asset_class"], "kr_stock")
         self.assertEqual(gp.resolve_symbol("黄金")["code"], "XAUTUSDT")
         self.assertEqual(gp.resolve_symbol("BTCUSDT")["asset_class"], "crypto")
+        self.assertEqual(gp.resolve_symbol("AAPL_USDT")["code"], "AAPL")
+        self.assertEqual(gp.resolve_symbol("AAPLUSDT")["code"], "AAPL")
+        self.assertTrue(gp.resolve_symbol("AAPL")["tokenized"])
+        self.assertEqual(gp.resolve_symbol("AAPL")["gate_contract"], "AAPL_USDT")
+        self.assertEqual(gp.resolve_symbol("TM")["code"], "7203.T")
+        self.assertEqual(gp.resolve_symbol("SAMSUNG")["code"], "005930")
+        self.assertEqual(gp.resolve_symbol("SPX500")["code"], ".INX")
+        self.assertEqual(gp.resolve_symbol("NAS100")["code"], ".NDX")
+        self.assertEqual(gp.resolve_symbol("QQQ")["gate_contract"], "QQQ_USDT")
         self.assertIsNone(gp.resolve_symbol("NOT_A_THING_ZZZ"))
         self.assertIsNone(gp.resolve_symbol(""))
 
@@ -503,6 +531,8 @@ class DashboardGlobalPoolContractTest(unittest.TestCase):
         self.assertIn("openCoverModal", self.html)
         self.assertIn("api/global_pool/override", self.html)
         self.assertIn("覆盖池已变更", self.html)
+        self.assertIn("股票代币", self.html)
+        self.assertIn("美股代币", self.html)
 
 
 class ValidateSymbolTest(unittest.TestCase):
@@ -617,6 +647,65 @@ class OverrideHttpTest(unittest.TestCase):
         out = self._req("POST", "api/global_pool/override", {"action": "clear"})
         self.assertEqual(out["mode"], "default")
         self.assertEqual(out["symbols"], [])
+
+
+class GateTokenPathTest(unittest.TestCase):
+    def test_aapl_uses_gate_not_binance_and_keeps_4h(self):
+        calls = []
+
+        def fake_gate(contract, limit=200, interval="1d"):
+            calls.append((contract, interval))
+            return _daily_bars(50)
+
+        with patch.object(sc, "fetch_gate_equity_klines", side_effect=fake_gate), \
+             patch.object(sc, "fetch_crypto_kline",
+                          side_effect=AssertionError("股票代币不得走 Binance 粘性路径")):
+            inst = sc.fetch_global_instrument("AAPL", interval="4h")
+        self.assertEqual(calls, [("AAPL_USDT", "4h")])
+        self.assertTrue(inst["tokenized"])
+        self.assertEqual(inst["source"], "gate")
+        self.assertEqual(inst["gate_contract"], "AAPL_USDT")
+        self.assertIsNone(inst.get("interval_note"))
+        self.assertFalse(inst.get("interval_limited"))
+
+    def test_alias_aapl_usdt_resolves_and_fetches_gate(self):
+        with patch.object(sc, "fetch_gate_equity_klines",
+                          return_value=_daily_bars(50)) as mock_g, \
+             patch.object(sc, "fetch_crypto_kline",
+                          side_effect=AssertionError("no binance")):
+            inst = sc.fetch_global_instrument("AAPL_USDT", interval="1d")
+        mock_g.assert_called_once()
+        self.assertEqual(inst["code"], "AAPL")
+        self.assertTrue(inst["tokenized"])
+
+    def test_nky_has_no_gate_token_falls_back(self):
+        inst = {
+            "code": "NKY", "name": "日经225", "price": 1, "chg": 0,
+            "bars": _daily_bars(50), "source": "sina", "asset_class": "jp_index",
+            "interval_note": "股票/指数无稳定 4h/8h 历史，已用日K",
+            "interval_limited": True, "tokenized": False,
+        }
+        with patch.object(sc, "fetch_gate_equity_klines",
+                          side_effect=AssertionError("NKY 无代币不应打 Gate")), \
+             patch("equity_sources.fetch_equity_instrument", return_value=inst):
+            out = sc.fetch_global_instrument("NKY", interval="4h")
+        self.assertTrue(out["interval_limited"])
+        self.assertEqual(out["source"], "sina")
+
+    def test_validate_gate_alias_without_crypto_list(self):
+        row = gp.validate_symbol("AAPL_USDT", crypto_ok=lambda *_: False, gate_ok=lambda *_: False)
+        self.assertTrue(row["ok"])
+        self.assertEqual(row["code"], "AAPL")
+        self.assertEqual(row["source"], "gate")
+        self.assertEqual(row["gate_contract"], "AAPL_USDT")
+
+    def test_gate_equity_excluded_from_crypto_topn(self):
+        tickers = [{"symbol": "AAPLUSDT", "price": 1, "chg": 99}] + _tickers(20)
+        pool = gp.build_global_pool(tickers, top_n=20, gold=_gold_row())
+        crypto = [x for x in pool if x["asset_class"] == "crypto"]
+        self.assertFalse(any(x["code"] == "AAPLUSDT" for x in crypto))
+        self.assertEqual(len(crypto), 20)
+        self.assertTrue(any(x["code"] == "AAPL" and x.get("tokenized") for x in pool))
 
 
 if __name__ == "__main__":

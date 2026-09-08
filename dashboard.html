@@ -118,8 +118,8 @@
     .asset-badge.gold { color: #E8C48A; background: rgba(232,196,138,.16); }
     .asset-badge.us_index { color: #9BB7E8; background: rgba(155,183,232,.16); }
     .asset-badge.us_stock { color: var(--ink-dim); background: rgba(229,212,182,.10); }
-    .asset-badge.jp_index, .asset-badge.jp_stock { color: #E8A0A0; background: rgba(232,160,160,.16); }
-    .asset-badge.kr_index, .asset-badge.kr_stock { color: #A8C4F0; background: rgba(168,196,240,.16); }
+    .asset-badge.tokenized { letter-spacing: 0; }
+    .token-note { font-size: 10.5px; color: var(--ink-faint); margin-left: 6px; }
     .pill-edit { cursor: pointer; }
     .pill-edit:hover { border-color: var(--mint); color: var(--ink); }
     .interval-note { font-size: 10.5px; color: var(--ink-faint); margin-left: 6px; }
@@ -272,7 +272,7 @@
         <button class="tab" data-box-mode="p1" type="button" title="斜向通道：OLS 中轴 + 残差分位数 + ADX">P1通道</button>
       </div>
     </div>
-    <div class="box-mode" id="cryptoIntervalWrap" title="全市场标的 K 线周期。币/金用原生 4h/8h/1d；股票无多日 4h/8h 时回退日K。切换后请强制重扫" style="display:none">
+    <div class="box-mode" id="cryptoIntervalWrap" title="全市场标的 K 线周期。币/金/股票代币用 Gate 原生 4h/8h/1d；无代币的股票指数回退日K。切换后请强制重扫" style="display:none">
       <span class="k">周期</span>
       <div class="tabs" id="cryptoIntervalTabs">
         <button class="tab" data-interval="4h" type="button">4h</button>
@@ -341,8 +341,8 @@
 <div class="modal-bg" id="coverModal" hidden>
   <div class="modal" role="dialog" aria-labelledby="coverModalTitle">
     <h4 id="coverModalTitle">覆盖标的池</h4>
-    <p class="hint">逗号或换行分隔。非空时扫描<b>只扫这些标的</b>；清空则恢复默认混合池（币 TOP20 + 黄金 + 美/日/韩指数与龙头）。保存前会校验能否被 Sina / Naver / 永续列表解析。</p>
-    <textarea id="coverSymbols" placeholder="AAPL, .INX, 7203.T, 005930, BTCUSDT, 黄金"></textarea>
+    <p class="hint">逗号或换行分隔。非空时扫描<b>只扫这些标的</b>；清空则恢复默认混合池（币 TOP20 + 黄金 + 美/日/韩指数与龙头）。美股等优先校验 Gate <b>股票代币</b>（如 AAPL_USDT），与正股可能有基差；无代币再走 Sina/Naver 日K。</p>
+    <textarea id="coverSymbols" placeholder="AAPL, AAPL_USDT, .INX, 7203.T, TM, 005930, BTCUSDT, 黄金"></textarea>
     <div class="modal-err" id="coverErr"></div>
     <div class="modal-actions">
       <button class="act ghost" type="button" id="btnCoverClear">清空（用默认）</button>
@@ -444,15 +444,17 @@ function intervalLabel(iv) {
 function assetClassOf(r) {
   return r.asset_class || (r.market === "crypto" ? "crypto" : "stock");
 }
-function assetBadgeHTML(cls) {
+function assetBadgeHTML(r) {
+  const cls = typeof r === "string" ? r : assetClassOf(r);
+  const tok = typeof r === "object" && r && r.tokenized;
   const lab = {
     crypto: "币", gold: "金",
-    us_index: "美指", us_stock: "美股",
-    jp_index: "日指", jp_stock: "日股",
-    kr_index: "韩指", kr_stock: "韩股",
+    us_index: tok ? "美指代币" : "美指", us_stock: tok ? "美股代币" : "美股",
+    jp_index: tok ? "日指代币" : "日指", jp_stock: tok ? "日股代币" : "日股",
+    kr_index: tok ? "韩指代币" : "韩指", kr_stock: tok ? "韩股代币" : "韩股",
   }[cls];
   if (!lab) return "";
-  return `<span class="asset-badge ${cls}">${lab}</span>`;
+  return `<span class="asset-badge ${cls}${tok ? " tokenized" : ""}">${lab}</span>`;
 }
 function matchPoolFilter(r, flt) {
   if (!flt || flt === "all") return true;
@@ -848,11 +850,14 @@ function cardHTML(r, i) {
   const hiLite = isFlag ? !!r.secondary_breakout_buy
     : isTl ? (r.tl_event && r.tl_event !== "none")
     : (isCrypto && r.qualified);
-  const aBadge = isCrypto ? assetBadgeHTML(assetClassOf(r)) : "";
+  const aBadge = isCrypto ? assetBadgeHTML(r) : "";
   const ivNote = (isCrypto && r.interval_note) ? `<span class="interval-note">${r.interval_note}</span>` : "";
+  const tokNote = (isCrypto && r.tokenized && !r.interval_note)
+    ? `<span class="token-note" title="Gate 股票代币，跟踪正股但可能有基差，非交易所官方行情">股票代币</span>` : "";
+  const cd = r.gate_contract ? `${r.code} · ${r.gate_contract}` : r.code;
   return `<article class="sig${hiLite ? ' q' : ''}" data-code="${r.code}" data-market="${S.market}" data-qualified="${r.qualified ? 1 : 0}" style="animation-delay:${Math.min(i * 50, 400)}ms">
     <div class="sig-top">
-      <div><div class="nm">${r.name}${aBadge}${qBadge}${fgBadge}<span data-edge-host>${evBadge}</span>${ivNote}</div><div class="cd">${r.code}</div></div>
+      <div><div class="nm">${r.name}${aBadge}${qBadge}${fgBadge}<span data-edge-host>${evBadge}</span>${ivNote}${tokNote}</div><div class="cd">${cd}</div></div>
       <div class="sig-top-right"><span class="px" data-px>${price}</span>
         <span class="chg ${clsOf(r.chg)}" data-chg>${chgText}</span>
         <span class="score-badge">${isFlag ? (r.flag_quality || "ok") : isTl ? (r.tl_quality || "none") : r.score}</span></div>
@@ -1370,7 +1375,7 @@ async function setCryptoInterval(iv) {
     S.kbars = {};
     resetKlineQueue();
     renderAll();
-    toast("K线周期：" + intervalLabel(iv) + "。币/金用原生周期；股票无 4h/8h 历史时用日K。请强制重扫");
+    toast("K线周期：" + intervalLabel(iv) + "。币/金/股票代币用 Gate 原生周期；无代币的指数用日K。请强制重扫");
   } catch (e) { toast("周期保存失败"); }
 }
 
