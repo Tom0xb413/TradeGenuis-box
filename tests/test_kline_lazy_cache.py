@@ -147,7 +147,7 @@ class DashboardLazyLoadContractTest(unittest.TestCase):
         self.assertIn("非箱体·振幅过大", self.html)
 
     def test_crypto_still_lists_pool(self):
-        self.assertIn("币圈：展示进池子全部标的", self.html)
+        self.assertIn("全球池：展示进池子全部标的", self.html)
         self.assertIn("chartPriority", self.html)
 
 

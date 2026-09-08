@@ -113,6 +113,11 @@
     .flag-badge.flag-buy { color: #1C223A; background: var(--up); }
     .flag-badge.tl-sup { color: var(--down); background: rgba(240,122,99,.16); }
     .flag-badge.tl-res { color: #1C223A; background: var(--up); }
+    .asset-badge { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 999px; font-size: 10px; font-weight: 600; vertical-align: 1px; border: 1px solid currentColor; }
+    .asset-badge.crypto { color: #8FC98B; background: rgba(143,201,139,.14); }
+    .asset-badge.gold { color: #E8C48A; background: rgba(232,196,138,.16); }
+    .asset-badge.us_index { color: #9BB7E8; background: rgba(155,183,232,.16); }
+    .asset-badge.us_stock { color: var(--ink-dim); background: rgba(229,212,182,.10); }
     .act { border: none; border-radius: 999px; font-size: 13px; font-weight: 600; letter-spacing: .08em; padding: 8px 20px; cursor: pointer; transition: filter .2s, transform .1s; color: var(--ink); }
     .act:active { transform: translateY(1px); }
     .act:disabled { opacity: .5; cursor: not-allowed; }
@@ -239,6 +244,23 @@
         <button class="tab" data-box-mode="p1" type="button" title="斜向通道：OLS 中轴 + 残差分位数 + ADX">P1通道</button>
       </div>
     </div>
+    <div class="box-mode" id="cryptoIntervalWrap" title="全球池 K 线周期。切换后请强制重扫以按新周期评分" style="display:none">
+      <span class="k">周期</span>
+      <div class="tabs" id="cryptoIntervalTabs">
+        <button class="tab" data-interval="4h" type="button">4h</button>
+        <button class="tab" data-interval="8h" type="button">8h</button>
+        <button class="tab on" data-interval="1d" type="button">1日</button>
+      </div>
+    </div>
+    <div class="box-mode" id="poolFilterWrap" title="全球池资产类别筛选" style="display:none">
+      <span class="k">池</span>
+      <div class="tabs" id="poolFilterTabs">
+        <button class="tab on" data-pool-filter="all" type="button">全部</button>
+        <button class="tab" data-pool-filter="crypto" type="button">仅币</button>
+        <button class="tab" data-pool-filter="us_stock" type="button">仅美股</button>
+        <button class="tab" data-pool-filter="gold_index" type="button">黄金+指数</button>
+      </div>
+    </div>
     <div class="box-mode" id="flagFilterWrap" title="旗形阶段筛选（仅高位旗形形态）" style="display:none">
       <span class="k">筛选</span>
       <div class="tabs" id="flagFilterTabs">
@@ -289,7 +311,7 @@
 
 <script>
 "use strict";
-const S = { watch: null, crypto: null, status: null, cfg: null, hot: [], loaded: false, kbars: {}, market: "stock", selBoard: null, flagFilter: "all", tlFilter: "all" };
+const S = { watch: null, crypto: null, status: null, cfg: null, hot: [], loaded: false, kbars: {}, market: "stock", selBoard: null, flagFilter: "all", tlFilter: "all", poolFilter: "all" };
 const $ = id => document.getElementById(id);
 const fmt2 = v => (v === null || v === undefined || isNaN(v)) ? "—" : Number(v).toFixed(2);
 const fmtc = v => (v === null || v === undefined || isNaN(v)) ? "—" : (v >= 1 ? Number(v).toFixed(2) : Number(v).toPrecision(4));
@@ -367,6 +389,36 @@ function familyLabel(fam) {
 }
 function currentFamily() {
   return (S.cfg && S.cfg.pattern_family) || "box";
+}
+function currentInterval() {
+  return (S.cfg && S.cfg.crypto_interval) || "1d";
+}
+function intervalLabel(iv) {
+  return { "4h": "4h", "8h": "8h", "1d": "1日" }[iv] || "1日";
+}
+function assetClassOf(r) {
+  return r.asset_class || (r.market === "crypto" ? "crypto" : "stock");
+}
+function assetBadgeHTML(cls) {
+  const lab = { crypto: "币", gold: "金", us_index: "指数", us_stock: "美股" }[cls];
+  if (!lab) return "";
+  return `<span class="asset-badge ${cls}">${lab}</span>`;
+}
+function matchPoolFilter(r, flt) {
+  if (!flt || flt === "all") return true;
+  const c = assetClassOf(r);
+  if (flt === "gold_index") return c === "gold" || c === "us_index";
+  return c === flt;
+}
+function poolCountBits(rows) {
+  const n = { crypto: 0, gold: 0, us_index: 0, us_stock: 0 };
+  (rows || []).forEach(r => { const c = assetClassOf(r); if (n[c] != null) n[c]++; });
+  const bits = [];
+  if (n.crypto) bits.push("币" + n.crypto);
+  if (n.gold) bits.push("金" + n.gold);
+  if (n.us_index) bits.push("指数" + n.us_index);
+  if (n.us_stock) bits.push("美股" + n.us_stock);
+  return bits.join(" · ");
 }
 function flagStageLabel(stage) {
   return { handle: "旗形整理", secondary_buy: "二次买点" }[stage] || "";
@@ -479,7 +531,7 @@ function renderAll() {
   $("hpHitLabel").textContent = fam === "high_flag" ? "旗形" : fam === "trendline" ? "趋势线" : "达标";
   $("hpHit").textContent = S.loaded ? hits.length : "—";
   $("hpCover").textContent = S.loaded
-    ? (scope === "crypto" ? (data.universe_size ?? "—") + " 币" :
+    ? (scope === "crypto" ? ((data.screened ?? data.universe_size ?? rows.length) + " 标的") :
        scope === "market" ? (data.universe_size ?? "—") + " 只" : "自选池")
     : "—";
   $("poolCount").textContent = S.loaded ? hits.length : "";
@@ -493,7 +545,10 @@ function renderAll() {
     $("cardsTitle").innerHTML = `趋势线 <span class="plan-count" id="poolCount">${S.loaded ? hits.length : ""}</span>`
       + (nBrk || nBo ? ` <span class="mode-tag">跌破 ${nBrk} · 突破 ${nBo}</span>` : "");
   } else if (scope === "crypto") {
-    $("cardsTitle").innerHTML = `币圈涨幅榜 <span class="plan-count" id="poolCount">${S.loaded ? rows.length : ""}</span> <span class="mode-tag" style="color:var(--up)">达标 ${hits.length}</span>`;
+    const bits = poolCountBits(rows);
+    $("cardsTitle").innerHTML = `全球池 <span class="plan-count" id="poolCount">${S.loaded ? rows.length : ""}</span>`
+      + (bits ? ` <span class="mode-tag">${bits}</span>` : "")
+      + ` <span class="mode-tag" style="color:var(--up)">达标 ${hits.length}</span>`;
   } else if (S.selBoard) {
     $("cardsTitle").innerHTML = `板块「${S.selBoard}」 <span class="plan-count" id="poolCount" data-board-count>—</span>`;
   } else {
@@ -505,9 +560,14 @@ function renderAll() {
   const scanMode = data.box_mode || "classic";
   const cfgFam = fam;
   const scanFam = data.pattern_family || "box";
+  const cfgIv = currentInterval();
+  const scanIv = data.crypto_interval || "1d";
   if (S.loaded && cfgFam !== scanFam && (rows.length || data.updated || data.as_of)) {
     hintText = (hintText ? hintText + " · " : "") +
       `扫描结果来自「${familyLabel(scanFam)}」，当前为「${familyLabel(cfgFam)}」，请强制重扫以更新`;
+  } else if (isCrypto && S.loaded && cfgIv !== scanIv && (rows.length || data.updated || data.as_of)) {
+    hintText = (hintText ? hintText + " · " : "") +
+      `扫描结果来自「${intervalLabel(scanIv)}」，当前为「${intervalLabel(cfgIv)}」，请强制重扫以更新`;
   } else if (S.loaded && cfgMode !== scanMode && (rows.length || data.updated || data.as_of)) {
     hintText = (hintText ? hintText + " · " : "") +
       `评分来自「${boxModeLabel(scanMode)}」，当前为「${boxModeLabel(cfgMode)}」，请强制重扫以更新评分`;
@@ -564,6 +624,17 @@ function renderCfg() {
   document.querySelectorAll("#marketTabs .tab").forEach(t => {
     t.classList.toggle("on", t.dataset.market === S.market);
   });
+  const ivWrap = $("cryptoIntervalWrap");
+  if (ivWrap) ivWrap.style.display = S.market === "crypto" ? "" : "none";
+  const iv = currentInterval();
+  document.querySelectorAll("#cryptoIntervalTabs .tab").forEach(t => {
+    t.classList.toggle("on", t.dataset.interval === iv);
+  });
+  const pfWrap = $("poolFilterWrap");
+  if (pfWrap) pfWrap.style.display = S.market === "crypto" ? "" : "none";
+  document.querySelectorAll("#poolFilterTabs .tab").forEach(t => {
+    t.classList.toggle("on", t.dataset.poolFilter === S.poolFilter);
+  });
 }
 
 /* =============================== 达标卡片 =============================== */
@@ -576,7 +647,7 @@ function renderCards(rows) {
   }
   const isCrypto = S.market === "crypto";
   const fam = currentFamily();
-  // 币圈：展示进池子全部标的（按涨跌幅降序），达标高亮
+  // 全球池：展示进池子全部标的（可按币/美股/黄金+指数筛选），达标高亮
   // A股：默认只展示达标；选中板块后展示该板块全部股票（按评分降序）
   // 高位旗形：批量筛选旗面 / 二次买点（不走四条件达标）
   let shown;
@@ -593,6 +664,7 @@ function renderCards(rows) {
         return c.some(n => n === S.selBoard || (n && S.selBoard && (n.includes(S.selBoard) || S.selBoard.includes(n))));
       });
     }
+    if (isCrypto) shown = shown.filter(r => matchPoolFilter(r, S.poolFilter));
     shown = shown.slice().sort((a, b) => {
       const ab = (b.secondary_breakout_buy ? 1 : 0) - (a.secondary_breakout_buy ? 1 : 0);
       if (ab) return ab;
@@ -618,6 +690,7 @@ function renderCards(rows) {
         return c.some(n => n === S.selBoard || (n && S.selBoard && (n.includes(S.selBoard) || S.selBoard.includes(n))));
       });
     }
+    if (isCrypto) shown = shown.filter(r => matchPoolFilter(r, S.poolFilter));
     shown = shown.slice().sort((a, b) => {
       const rank = ev => ev === "resistance_break" ? 2 : ev === "support_break" ? 1 : 0;
       const er = rank(b.tl_event) - rank(a.tl_event);
@@ -633,7 +706,11 @@ function renderCards(rows) {
     $("cardsTitle").innerHTML = `${title} <span class="plan-count" id="poolCount">${shown.length}</span>`;
     $("hpHit").textContent = shown.length;
   } else if (isCrypto) {
-    shown = rows.slice().sort((a, b) => (b.chg || 0) - (a.chg || 0));
+    shown = rows.filter(r => matchPoolFilter(r, S.poolFilter)).slice().sort((a, b) => (b.chg || 0) - (a.chg || 0));
+    if (S.poolFilter !== "all") {
+      $("cardsTitle").innerHTML = `全球池 <span class="plan-count" id="poolCount">${shown.length}</span>`
+        + (poolCountBits(shown) ? ` <span class="mode-tag">${poolCountBits(shown)}</span>` : "");
+    }
   } else if (S.selBoard) {
     shown = rows.filter(r => {
       const c = (r.concepts || []).concat(r.hot_boards || []);
@@ -653,7 +730,7 @@ function renderCards(rows) {
           : S.tlFilter === "resistance_break" ? "暂无刚突破压力" : "暂无有效趋势线")
       : (S.selBoard ? `该板块暂无股票` : "暂无数据");
     box.innerHTML = `<div class="empty"><div class="big">NO SIGNAL</div><p>${emptyMsg}</p>
-      <button class="act go" type="button" onclick="doScan(false)">${isCrypto ? "币圈扫描" : "全市场扫描"}</button></div>`;
+      <button class="act go" type="button" onclick="doScan(false)">${isCrypto ? "全球池扫描" : "全市场扫描"}</button></div>`;
     return;
   }
   // 币圈仍列出全部进池标的；K 线只在卡片进入视口附近才拉取（见 observeCardCharts）
@@ -686,7 +763,7 @@ function cardHTML(r, i) {
     ? [
         ["倍量", (r.volume_days || 0) + "日", r.volume_days >= 3 && r.volume_ratio >= 1.8],
         ["试盘", (r.tests ?? 0) + "次", (r.tests || 0) >= 3],
-        ["24h", signOf(r.chg, "crypto") + "%", r.chg > 0],
+        ["涨跌", signOf(r.chg, "crypto") + "%", r.chg > 0],
       ]
     : [
         ["热点", r.theme_ok ? "✓" : "—", r.theme_ok],
@@ -710,9 +787,10 @@ function cardHTML(r, i) {
   const hiLite = isFlag ? !!r.secondary_breakout_buy
     : isTl ? (r.tl_event && r.tl_event !== "none")
     : (isCrypto && r.qualified);
+  const aBadge = isCrypto ? assetBadgeHTML(assetClassOf(r)) : "";
   return `<article class="sig${hiLite ? ' q' : ''}" data-code="${r.code}" data-market="${S.market}" data-qualified="${r.qualified ? 1 : 0}" style="animation-delay:${Math.min(i * 50, 400)}ms">
     <div class="sig-top">
-      <div><div class="nm">${r.name}${qBadge}${fgBadge}<span data-edge-host>${evBadge}</span></div><div class="cd">${r.code}</div></div>
+      <div><div class="nm">${r.name}${aBadge}${qBadge}${fgBadge}<span data-edge-host>${evBadge}</span></div><div class="cd">${r.code}</div></div>
       <div class="sig-top-right"><span class="px" data-px>${price}</span>
         <span class="chg ${clsOf(r.chg)}" data-chg>${chgText}</span>
         <span class="score-badge">${isFlag ? (r.flag_quality || "ok") : isTl ? (r.tl_quality || "none") : r.score}</span></div>
@@ -760,7 +838,8 @@ function klineOk(d) {
 }
 function ensureK(code, market) {
   market = market || S.market;
-  const key = market + ":" + code;
+  const iv = market === "crypto" ? currentInterval() : "";
+  const key = market + ":" + code + (iv ? (":" + iv) : "");
   const hit = S.kbars[key];
   if (klineOk(hit)) return Promise.resolve(hit);
   return new Promise(resolve => {
@@ -978,7 +1057,9 @@ function drawChart(cv, d) {
   ctx.strokeStyle = "rgba(229,212,182,.07)"; ctx.beginPath(); ctx.moveTo(padL, vh + 10); ctx.lineTo(W - padR, vh + 10); ctx.stroke();
   ctx.textAlign = "center";
   [0, Math.floor(n / 4), Math.floor(n / 2), Math.floor(n * 3 / 4), n - 1].forEach(i => {
-    ctx.fillStyle = "rgba(229,212,182,.4)"; ctx.fillText(bars[i].date.slice(5), padL + i * step + step / 2, H - 4);
+    ctx.fillStyle = "rgba(229,212,182,.4)";
+    const lab = String(bars[i].date || "");
+    ctx.fillText(lab.length >= 16 ? lab.slice(5, 16) : lab.slice(5), padL + i * step + step / 2, H - 4);
   });
 
   const evMap = {};
@@ -1044,10 +1125,10 @@ let localScanWait = false;
 let scanPollTimer = null;
 let scanWasRunning = false;
 function scanBtnLabel() {
-  return S.market === "crypto" ? "币圈扫描" : "全市场扫描";
+  return S.market === "crypto" ? "全球池扫描" : "全市场扫描";
 }
 function scanModeLabel(mode) {
-  return { market: "全市场扫描", quick: "全市场快扫", crypto: "币圈扫描", pool: "自选池扫描" }[mode] || "扫描";
+  return { market: "全市场扫描", quick: "全市场快扫", crypto: "全球池扫描", pool: "自选池扫描" }[mode] || "扫描";
 }
 function isScanRunning(st) {
   if (!st) return false;
@@ -1207,6 +1288,28 @@ async function setPatternFamily(fam) {
   } catch (e) { toast("形态保存失败"); }
 }
 
+async function setCryptoInterval(iv) {
+  if (iv !== "4h" && iv !== "8h" && iv !== "1d") return;
+  const prev = currentInterval();
+  if (prev === iv) return;
+  try {
+    const r = await jfetch("api/config", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ crypto_interval: iv }) });
+    S.cfg = r.config;
+    S.kbars = {};
+    resetKlineQueue();
+    renderAll();
+    toast("K线周期：" + intervalLabel(iv) + "。请强制重扫以按新周期评分");
+  } catch (e) { toast("周期保存失败"); }
+}
+
+function setPoolFilter(flt) {
+  if (flt !== "all" && flt !== "crypto" && flt !== "us_stock" && flt !== "gold_index") return;
+  if (S.poolFilter === flt) return;
+  S.poolFilter = flt;
+  renderAll();
+}
+
 function setFlagFilter(flt) {
   if (flt !== "all" && flt !== "handle" && flt !== "secondary_buy") return;
   if (S.flagFilter === flt) return;
@@ -1262,6 +1365,12 @@ function boot() {
   });
   document.querySelectorAll("#tlFilterTabs .tab").forEach(t => {
     t.addEventListener("click", () => setTlFilter(t.dataset.tlFilter));
+  });
+  document.querySelectorAll("#cryptoIntervalTabs .tab").forEach(t => {
+    t.addEventListener("click", () => setCryptoInterval(t.dataset.interval));
+  });
+  document.querySelectorAll("#poolFilterTabs .tab").forEach(t => {
+    t.addEventListener("click", () => setPoolFilter(t.dataset.poolFilter));
   });
   refresh().then(() => {
     refreshQuotes();

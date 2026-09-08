@@ -16,7 +16,7 @@ TradeGenuis · 箱体突破 本地看板服务器
   POST /api/scan            触发扫描 {mode, force}；1 小时内默认返回缓存。
                             已在扫描时返回 {status:running, scan_progress}（加入当前任务，不开第二轮）
   GET  /api/status          扫描状态：scanning + scan_progress + 最近 scan_log
-  GET/POST /api/config      配置（自动扫描 / Telegram / box_mode / pattern_family / scan_workers）
+  GET/POST /api/config      配置（自动扫描 / Telegram / box_mode / pattern_family / scan_workers / crypto_interval）
 
 自动扫描调度：config.auto 开启时，每个交易日 11:30 与 15:00 自动执行全市场扫描（绕过 1h 缓存）。
 """
@@ -31,6 +31,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import unquote
 
 import scanner as sc
 
@@ -46,6 +47,7 @@ DEFAULT_CONFIG = {
     "tg_chat": "",
     "box_mode": "classic",              # classic | p0 | p1（斜向通道）
     "pattern_family": "box",            # box | high_flag | trendline（默认 box，不打断现有用户）
+    "crypto_interval": "1d",            # 加密货币 Tab K 线/扫描周期：4h | 8h | 1d
     "scan_workers": sc.SCAN_WORKERS_DEFAULT,  # 4–32，亦可用环境变量 SCAN_WORKERS
 }
 
@@ -96,7 +98,7 @@ def parse_query(path: str) -> tuple[str, dict]:
         for kv in path.split("?", 1)[1].split("&"):
             if "=" in kv:
                 k, v = kv.split("=", 1)
-                q[k] = v
+                q[unquote(k)] = unquote(v)
     return p, q
 
 
@@ -108,6 +110,11 @@ def configured_box_mode() -> str:
 def configured_pattern_family() -> str:
     with LOCK:
         return sc.normalize_pattern_family(STATE["config"].get("pattern_family"))
+
+
+def configured_crypto_interval() -> str:
+    with LOCK:
+        return sc.normalize_crypto_interval(STATE["config"].get("crypto_interval"))
 
 
 def attach_cache_meta(payload: dict | None, *, from_cache: bool) -> dict:
@@ -169,6 +176,10 @@ def scan_cache_response(mode: str, force: bool = False) -> dict | None:
     data_fam = sc.normalize_pattern_family(data.get("pattern_family") or "box")
     if data_fam != configured_pattern_family():
         return None
+    if mode == "crypto":
+        data_iv = sc.normalize_crypto_interval(data.get("crypto_interval"))
+        if data_iv != configured_crypto_interval():
+            return None
     out = attach_cache_meta(data, from_cache=True)
     out["status"] = "cached"
     out["msg"] = "1小时内使用缓存结果，未重新全量扫描"
@@ -360,6 +371,8 @@ def load_config() -> None:
                         STATE["config"][k] = data[k]
                 STATE["config"]["scan_workers"] = sc.clamp_scan_workers(
                     STATE["config"].get("scan_workers"))
+                STATE["config"]["crypto_interval"] = sc.normalize_crypto_interval(
+                    STATE["config"].get("crypto_interval"))
     except Exception:
         pass
 
@@ -371,6 +384,9 @@ def save_config(cfg: dict) -> None:
     if "pattern_family" in incoming:
         incoming["pattern_family"] = sc.normalize_pattern_family(
             incoming.get("pattern_family"))
+    if "crypto_interval" in incoming:
+        incoming["crypto_interval"] = sc.normalize_crypto_interval(
+            incoming.get("crypto_interval"))
     if "scan_workers" in incoming:
         incoming["scan_workers"] = sc.clamp_scan_workers(incoming.get("scan_workers"))
     with LOCK:
@@ -543,8 +559,8 @@ def _kline_today() -> str:
     return datetime.now(sc.BJT).strftime("%Y-%m-%d")
 
 
-def _kline_mem_key(market: str, code: str):
-    return ("k", market, code)
+def _kline_mem_key(market: str, code: str, interval: str = ""):
+    return ("k", market, code, interval or "")
 
 
 def _valid_kline_payload(payload) -> bool:
@@ -555,9 +571,9 @@ def _valid_kline_payload(payload) -> bool:
     return isinstance(bars, list) and len(bars) > 0
 
 
-def _kline_mem_get(market: str, code: str):
+def _kline_mem_get(market: str, code: str, interval: str = ""):
     with LOCK:
-        cached = STATE["kline_cache"].get(_kline_mem_key(market, code))
+        cached = STATE["kline_cache"].get(_kline_mem_key(market, code, interval))
     if not cached:
         return None
     ts, payload = cached
@@ -568,21 +584,24 @@ def _kline_mem_get(market: str, code: str):
     return payload
 
 
-def _kline_mem_put(market: str, code: str, payload: dict) -> None:
+def _kline_mem_put(market: str, code: str, payload: dict, interval: str = "") -> None:
     if not _valid_kline_payload(payload):
         return
     with LOCK:
-        STATE["kline_cache"][_kline_mem_key(market, code)] = (time.time(), payload)
+        STATE["kline_cache"][_kline_mem_key(market, code, interval)] = (time.time(), payload)
 
 
-def _kline_disk_path(market: str, code: str) -> Path:
+def _kline_disk_path(market: str, code: str, interval: str = "") -> Path:
     safe_m = re.sub(r"[^a-z0-9]", "", (market or "stock").lower()) or "stock"
     safe_c = re.sub(r"[^A-Za-z0-9._-]", "_", str(code or ""))[:48] or "unknown"
+    if market == "crypto" and interval:
+        safe_iv = re.sub(r"[^a-z0-9]", "", interval.lower()) or "1d"
+        return KLINE_DISK_DIR / f"{safe_m}_{safe_c}_{safe_iv}_{_kline_today()}.json"
     return KLINE_DISK_DIR / f"{safe_m}_{safe_c}_{_kline_today()}.json"
 
 
-def _kline_disk_get(market: str, code: str):
-    path = _kline_disk_path(market, code)
+def _kline_disk_get(market: str, code: str, interval: str = ""):
+    path = _kline_disk_path(market, code, interval)
     try:
         if not path.is_file():
             return None
@@ -598,12 +617,12 @@ def _kline_disk_get(market: str, code: str):
         return None
 
 
-def _kline_disk_put(market: str, code: str, payload: dict) -> None:
+def _kline_disk_put(market: str, code: str, payload: dict, interval: str = "") -> None:
     if not _valid_kline_payload(payload):
         return
     try:
         KLINE_DISK_DIR.mkdir(parents=True, exist_ok=True)
-        path = _kline_disk_path(market, code)
+        path = _kline_disk_path(market, code, interval)
         tmp = path.with_suffix(".json.tmp")
         blob = json.dumps({"ts": time.time(), "payload": payload}, ensure_ascii=False)
         tmp.write_text(blob, encoding="utf-8")
@@ -635,23 +654,26 @@ def _with_box(payload: dict) -> dict:
 
 
 def get_kline(code: str, lmt: int = 160, market: str = "stock") -> dict | None:
-    """个股/币日K + 箱体。成功结果缓存 ~45 分钟；错误与空序列不写入。"""
-    hit = _kline_mem_get(market, code)
+    """个股/币/全球池 K 线 + 箱体。成功结果缓存 ~45 分钟；错误与空序列不写入。
+    加密货币 Tab 使用配置中的 crypto_interval，缓存键含周期以免 4h/1d 串用。"""
+    interval = configured_crypto_interval() if market == "crypto" else ""
+    hit = _kline_mem_get(market, code, interval)
     if hit:
         return _with_box(hit)
-    hit = _kline_disk_get(market, code)
+    hit = _kline_disk_get(market, code, interval)
     if hit:
-        _kline_mem_put(market, code, hit)
+        _kline_mem_put(market, code, hit, interval)
         return _with_box(hit)
     try:
         if market == "crypto":
-            bars = sc.fetch_crypto_kline(code)
+            bars = sc.fetch_tab_kline(code, interval=interval, limit=sc.CRYPTO_LOOKBACK)
             if not bars:
                 return {"code": code, "error": "empty kline"}
             payload = {
                 "code": code, "name": code, "price": bars[-1]["close"],
                 "chg": None, "turnover": None, "volume_ratio": None,
                 "bar_date": bars[-1]["date"], "bars": bars,
+                "crypto_interval": interval,
             }
         else:
             quote = sc.fetch_quote(code)
@@ -664,8 +686,8 @@ def get_kline(code: str, lmt: int = 160, market: str = "stock") -> dict | None:
                 "turnover": quote["turnover"], "volume_ratio": quote["volume_ratio"],
                 "bar_date": bars[-1]["date"], "bars": bars,
             }
-        _kline_mem_put(market, code, payload)
-        _kline_disk_put(market, code, payload)
+        _kline_mem_put(market, code, payload, interval)
+        _kline_disk_put(market, code, payload, interval)
         return _with_box(payload)
     except Exception as e:
         return {"code": code, "error": str(e)[:150]}
@@ -742,9 +764,11 @@ class Handler(BaseHTTPRequestHandler):
                 cfg = dict(STATE["config"])
             cfg["box_mode"] = sc.normalize_box_mode(cfg.get("box_mode"))
             cfg["pattern_family"] = sc.normalize_pattern_family(cfg.get("pattern_family"))
+            cfg["crypto_interval"] = sc.normalize_crypto_interval(cfg.get("crypto_interval"))
             cfg["scan_workers"] = sc.clamp_scan_workers(cfg.get("scan_workers"))
             cfg["box_modes"] = list(sc.BOX_MODES)
             cfg["pattern_families"] = list(sc.PATTERN_FAMILIES)
+            cfg["crypto_intervals"] = list(sc.CRYPTO_INTERVALS)
             self._json(cfg)
         elif p == "/api/quotes":
             codes = [c for c in q.get("codes", "").split(",") if c.isdigit()][:100]
@@ -782,8 +806,10 @@ class Handler(BaseHTTPRequestHandler):
                 cfg = dict(STATE["config"])
             cfg["box_modes"] = list(sc.BOX_MODES)
             cfg["pattern_families"] = list(sc.PATTERN_FAMILIES)
+            cfg["crypto_intervals"] = list(sc.CRYPTO_INTERVALS)
             cfg["box_mode"] = sc.normalize_box_mode(cfg.get("box_mode"))
             cfg["pattern_family"] = sc.normalize_pattern_family(cfg.get("pattern_family"))
+            cfg["crypto_interval"] = sc.normalize_crypto_interval(cfg.get("crypto_interval"))
             cfg["scan_workers"] = sc.clamp_scan_workers(cfg.get("scan_workers"))
             self._json({"ok": True, "config": cfg})
         elif p == "/api/pool":
