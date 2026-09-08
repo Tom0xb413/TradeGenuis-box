@@ -6,6 +6,7 @@
 |---|---|---|
 | `box` | 箱体/通道 | **默认**。沿用 classic / p0 / p1 箱体四条件，不改 100 分制 |
 | `high_flag` | 高位旗形(杯柄) | 跑 `pattern_flag.detect_high_flag`；列表按旗面 / 二次买点筛选 |
+| `trendline` | 趋势线 | 跑 `pattern_trendline.detect_trendline`；见 [pattern-trendline.md](pattern-trendline.md) |
 
 写入 `data/config.json`，经 `GET/POST /api/config` 持久化。A 股全市场 / 快扫 / 自选池与币圈扫描、`/api/kline` 都读该字段。
 

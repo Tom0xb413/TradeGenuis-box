@@ -111,6 +111,8 @@
     .flag-badge { display: inline-block; margin-left: 6px; padding: 0 7px; border-radius: 999px; font-size: 10.5px; font-weight: 600; vertical-align: 1px; border: 1px solid currentColor; }
     .flag-badge.flag-handle { color: #E8C48A; background: rgba(232,196,138,.16); }
     .flag-badge.flag-buy { color: #1C223A; background: var(--up); }
+    .flag-badge.tl-sup { color: var(--down); background: rgba(240,122,99,.16); }
+    .flag-badge.tl-res { color: #1C223A; background: var(--up); }
     .act { border: none; border-radius: 999px; font-size: 13px; font-weight: 600; letter-spacing: .08em; padding: 8px 20px; cursor: pointer; transition: filter .2s, transform .1s; color: var(--ink); }
     .act:active { transform: translateY(1px); }
     .act:disabled { opacity: .5; cursor: not-allowed; }
@@ -221,11 +223,12 @@
     <label class="pill autodrop" title="每个交易日午间收盘与收盘自动全市场扫描">
       <input type="checkbox" id="autoCb" /><span>自动扫描</span><span class="mode-tag" id="autoTimes">11:30 / 15:00</span>
     </label>
-    <div class="box-mode" id="familyWrap" title="识别目标：箱体/通道 或 高位旗形(杯柄)。切换后请强制重扫">
+    <div class="box-mode" id="familyWrap" title="识别目标：箱体/通道、高位旗形或趋势线。切换后请强制重扫">
       <span class="k">形态</span>
       <div class="tabs" id="familyTabs">
         <button class="tab on" data-family="box" type="button">箱体/通道</button>
         <button class="tab" data-family="high_flag" type="button">高位旗形(杯柄)</button>
+        <button class="tab" data-family="trendline" type="button">趋势线</button>
       </div>
     </div>
     <div class="box-mode" id="boxModeWrap" title="箱体识别模式：切换后 K 线箱体立即按新规则绘制，评分需强制重扫">
@@ -242,6 +245,14 @@
         <button class="tab on" data-flag-filter="all" type="button">全部旗形</button>
         <button class="tab" data-flag-filter="handle" type="button">仅旗形</button>
         <button class="tab" data-flag-filter="secondary_buy" type="button">仅二次买点</button>
+      </div>
+    </div>
+    <div class="box-mode" id="tlFilterWrap" title="趋势线事件筛选（仅趋势线形态）" style="display:none">
+      <span class="k">筛选</span>
+      <div class="tabs" id="tlFilterTabs">
+        <button class="tab on" data-tl-filter="all" type="button">全部有线</button>
+        <button class="tab" data-tl-filter="support_break" type="button">刚跌破支撑</button>
+        <button class="tab" data-tl-filter="resistance_break" type="button">刚突破压力</button>
       </div>
     </div>
     <span class="grow"></span>
@@ -278,7 +289,7 @@
 
 <script>
 "use strict";
-const S = { watch: null, crypto: null, status: null, cfg: null, hot: [], loaded: false, kbars: {}, market: "stock", selBoard: null, flagFilter: "all" };
+const S = { watch: null, crypto: null, status: null, cfg: null, hot: [], loaded: false, kbars: {}, market: "stock", selBoard: null, flagFilter: "all", tlFilter: "all" };
 const $ = id => document.getElementById(id);
 const fmt2 = v => (v === null || v === undefined || isNaN(v)) ? "—" : Number(v).toFixed(2);
 const fmtc = v => (v === null || v === undefined || isNaN(v)) ? "—" : (v >= 1 ? Number(v).toFixed(2) : Number(v).toPrecision(4));
@@ -352,7 +363,7 @@ function boxModeLabel(mode) {
   return { classic: "经典", p0: "P0增强", p1: "P1通道" }[mode] || "经典";
 }
 function familyLabel(fam) {
-  return { box: "箱体/通道", high_flag: "高位旗形(杯柄)" }[fam] || "箱体/通道";
+  return { box: "箱体/通道", high_flag: "高位旗形(杯柄)", trendline: "趋势线" }[fam] || "箱体/通道";
 }
 function currentFamily() {
   return (S.cfg && S.cfg.pattern_family) || "box";
@@ -360,10 +371,13 @@ function currentFamily() {
 function flagStageLabel(stage) {
   return { handle: "旗形整理", secondary_buy: "二次买点" }[stage] || "";
 }
-function flagBadgeHTML(stage) {
-  const lab = flagStageLabel(stage);
+function tlEventLabel(ev) {
+  return { support_break: "跌破支撑", resistance_break: "突破压力" }[ev] || "";
+}
+function tlBadgeHTML(ev) {
+  const lab = tlEventLabel(ev);
   if (!lab) return "";
-  const cls = stage === "secondary_buy" ? "flag-buy" : "flag-handle";
+  const cls = ev === "resistance_break" ? "tl-res" : "tl-sup";
   return `<span class="flag-badge ${cls}">${lab}</span>`;
 }
 function boxKindLabel(kind) {
@@ -392,6 +406,17 @@ function boxLineText(src) {
   if (kind) s += " · " + kind;
   if (src.box_quality === "weak") s += " · 偏弱";
   return s;
+}
+function tlMetricsText(src) {
+  const tl = src && (src.tl_support || src.tl_resistance) ? src : (src && src.trendline) || src || {};
+  const bits = [];
+  if (tl.tl_support && tl.tl_support.L_now != null) bits.push("支撑 " + fmt2(tl.tl_support.L_now));
+  if (tl.tl_resistance && tl.tl_resistance.L_now != null) bits.push("压力 " + fmt2(tl.tl_resistance.L_now));
+  const q = tl.tl_quality || "";
+  if (q && q !== "none") bits.push(q);
+  const ev = tlEventLabel(tl.tl_event);
+  if (ev) bits.push(ev);
+  return bits.join(" · ") || "趋势线";
 }
 function channelSeries(box, bars) {
   const pts = (box && box.channel_points) || [];
@@ -447,10 +472,11 @@ function renderAll() {
   const rows = data.candidates || data.items || [];
   const fam = currentFamily();
   const flagHits = rows.filter(r => r.pattern === "high_flag");
-  const hits = fam === "high_flag" ? flagHits : rows.filter(r => r.qualified);
+  const tlHits = rows.filter(r => r.tl_has_line || r.tl_support || r.tl_resistance);
+  const hits = fam === "high_flag" ? flagHits : fam === "trendline" ? tlHits : rows.filter(r => r.qualified);
   const scope = data.scope;
 
-  $("hpHitLabel").textContent = fam === "high_flag" ? "旗形" : "达标";
+  $("hpHitLabel").textContent = fam === "high_flag" ? "旗形" : fam === "trendline" ? "趋势线" : "达标";
   $("hpHit").textContent = S.loaded ? hits.length : "—";
   $("hpCover").textContent = S.loaded
     ? (scope === "crypto" ? (data.universe_size ?? "—") + " 币" :
@@ -461,6 +487,11 @@ function renderAll() {
     const nBuy = flagHits.filter(r => r.flag_stage === "secondary_buy").length;
     $("cardsTitle").innerHTML = `高位旗形 <span class="plan-count" id="poolCount">${S.loaded ? hits.length : ""}</span>`
       + (nBuy ? ` <span class="mode-tag" style="color:var(--up)">二次买点 ${nBuy}</span>` : "");
+  } else if (fam === "trendline") {
+    const nBrk = tlHits.filter(r => r.tl_event === "support_break").length;
+    const nBo = tlHits.filter(r => r.tl_event === "resistance_break").length;
+    $("cardsTitle").innerHTML = `趋势线 <span class="plan-count" id="poolCount">${S.loaded ? hits.length : ""}</span>`
+      + (nBrk || nBo ? ` <span class="mode-tag">跌破 ${nBrk} · 突破 ${nBo}</span>` : "");
   } else if (scope === "crypto") {
     $("cardsTitle").innerHTML = `币圈涨幅榜 <span class="plan-count" id="poolCount">${S.loaded ? rows.length : ""}</span> <span class="mode-tag" style="color:var(--up)">达标 ${hits.length}</span>`;
   } else if (S.selBoard) {
@@ -517,13 +548,18 @@ function renderCfg() {
   });
   const boxWrap = $("boxModeWrap");
   if (boxWrap) {
-    boxWrap.classList.toggle("dimmed", fam === "high_flag");
-    boxWrap.style.display = fam === "high_flag" ? "none" : "";
+    boxWrap.classList.toggle("dimmed", fam !== "box");
+    boxWrap.style.display = fam !== "box" ? "none" : "";
   }
   const flagWrap = $("flagFilterWrap");
   if (flagWrap) flagWrap.style.display = fam === "high_flag" ? "" : "none";
   document.querySelectorAll("#flagFilterTabs .tab").forEach(t => {
     t.classList.toggle("on", t.dataset.flagFilter === S.flagFilter);
+  });
+  const tlWrap = $("tlFilterWrap");
+  if (tlWrap) tlWrap.style.display = fam === "trendline" ? "" : "none";
+  document.querySelectorAll("#tlFilterTabs .tab").forEach(t => {
+    t.classList.toggle("on", t.dataset.tlFilter === S.tlFilter);
   });
   document.querySelectorAll("#marketTabs .tab").forEach(t => {
     t.classList.toggle("on", t.dataset.market === S.market);
@@ -569,6 +605,33 @@ function renderCards(rows) {
     const title = titleBits[S.flagFilter] || "高位旗形";
     $("cardsTitle").innerHTML = `${title} <span class="plan-count" id="poolCount">${shown.length}</span>`;
     $("hpHit").textContent = shown.length;
+  } else if (fam === "trendline") {
+    shown = rows.filter(r => r.tl_has_line || r.tl_support || r.tl_resistance);
+    if (S.tlFilter === "support_break") {
+      shown = rows.filter(r => r.tl_event === "support_break");
+    } else if (S.tlFilter === "resistance_break") {
+      shown = rows.filter(r => r.tl_event === "resistance_break");
+    }
+    if (!isCrypto && S.selBoard) {
+      shown = shown.filter(r => {
+        const c = (r.concepts || []).concat(r.hot_boards || []);
+        return c.some(n => n === S.selBoard || (n && S.selBoard && (n.includes(S.selBoard) || S.selBoard.includes(n))));
+      });
+    }
+    shown = shown.slice().sort((a, b) => {
+      const rank = ev => ev === "resistance_break" ? 2 : ev === "support_break" ? 1 : 0;
+      const er = rank(b.tl_event) - rank(a.tl_event);
+      if (er) return er;
+      const q = (x) => x === "ok" ? 2 : x === "weak" ? 1 : 0;
+      return q(b.tl_quality) - q(a.tl_quality);
+    });
+    const titleBits = {
+      support_break: "刚跌破支撑",
+      resistance_break: "刚突破压力",
+    };
+    const title = titleBits[S.tlFilter] || "趋势线";
+    $("cardsTitle").innerHTML = `${title} <span class="plan-count" id="poolCount">${shown.length}</span>`;
+    $("hpHit").textContent = shown.length;
   } else if (isCrypto) {
     shown = rows.slice().sort((a, b) => (b.chg || 0) - (a.chg || 0));
   } else if (S.selBoard) {
@@ -585,6 +648,9 @@ function renderCards(rows) {
   if (!shown.length) {
     const emptyMsg = currentFamily() === "high_flag"
       ? (S.flagFilter === "secondary_buy" ? "暂无二次买点" : "暂无高位旗形匹配")
+      : currentFamily() === "trendline"
+        ? (S.tlFilter === "support_break" ? "暂无刚跌破支撑"
+          : S.tlFilter === "resistance_break" ? "暂无刚突破压力" : "暂无有效趋势线")
       : (S.selBoard ? `该板块暂无股票` : "暂无数据");
     box.innerHTML = `<div class="empty"><div class="big">NO SIGNAL</div><p>${emptyMsg}</p>
       <button class="act go" type="button" onclick="doScan(false)">${isCrypto ? "币圈扫描" : "全市场扫描"}</button></div>`;
@@ -599,6 +665,7 @@ function cardHTML(r, i) {
   const isCrypto = S.market === "crypto";
   const fam = currentFamily();
   const isFlag = fam === "high_flag";
+  const isTl = fam === "trendline";
   const items = isFlag
     ? [
         ["Pole", r.pole_date ? String(r.pole_date).slice(5) : "—", true],
@@ -606,6 +673,14 @@ function cardHTML(r, i) {
         ["旗面", (r.handle_len ?? "—") + "日", (r.handle_len || 0) >= 2],
         ["缩量", r.vol_dry_ratio != null ? Number(r.vol_dry_ratio).toFixed(2) : "—", (r.vol_dry_ratio || 1) <= 0.55],
         ["回撤", (r.retrace_depth != null ? Number(r.retrace_depth).toFixed(1) : "—") + "%", (r.retrace_depth || 0) <= 8],
+      ]
+    : isTl
+    ? [
+        ["支撑", r.tl_support && r.tl_support.L_now != null ? fmt2(r.tl_support.L_now) : "—", !!r.tl_support],
+        ["压力", r.tl_resistance && r.tl_resistance.L_now != null ? fmt2(r.tl_resistance.L_now) : "—", !!r.tl_resistance],
+        ["触点", String((r.tl_support && r.tl_support.touches) || (r.tl_resistance && r.tl_resistance.touches) || "—"),
+          ((r.tl_support && r.tl_support.touches) || 0) >= 2 || ((r.tl_resistance && r.tl_resistance.touches) || 0) >= 2],
+        ["事件", tlEventLabel(r.tl_event) || "—", r.tl_event && r.tl_event !== "none"],
       ]
     : isCrypto
     ? [
@@ -622,21 +697,25 @@ function cardHTML(r, i) {
       ];
   const price = isCrypto ? fmtc(r.price) : fmt2(r.price);
   const chgText = signOf(r.chg, S.market) + "%";
-  const qBadge = (isCrypto && r.qualified && !isFlag) ? '<span class="q-badge">达标</span>' : "";
-  const evBadge = isFlag ? "" : edgeBadgeHTML(r.edge_event);
-  const fgBadge = isFlag ? flagBadgeHTML(r.flag_stage) : "";
-  const boHint = (!isFlag && r.breakout_candidates > 0)
+  const qBadge = (isCrypto && r.qualified && !isFlag && !isTl) ? '<span class="q-badge">达标</span>' : "";
+  const evBadge = (isFlag || isTl) ? "" : edgeBadgeHTML(r.edge_event);
+  const fgBadge = isFlag ? flagBadgeHTML(r.flag_stage) : (isTl ? tlBadgeHTML(r.tl_event) : "");
+  const boHint = (!isFlag && !isTl && r.breakout_candidates > 0)
     ? `<span class="box">突破候选 ${r.breakout_candidates}</span>` : "";
   const metrics = isFlag
     ? `<span class="box" data-metrics>旗面 ${fmt2(r.handle_low)}–${fmt2(r.handle_high)} · ${r.flag_quality || ""}</span>`
+    : isTl
+    ? `<span class="box" data-metrics>${tlMetricsText(r)}</span>`
     : `<span class="box" data-metrics>${boxLineText(r)}</span>`;
-  const hiLite = isFlag ? !!r.secondary_breakout_buy : (isCrypto && r.qualified);
+  const hiLite = isFlag ? !!r.secondary_breakout_buy
+    : isTl ? (r.tl_event && r.tl_event !== "none")
+    : (isCrypto && r.qualified);
   return `<article class="sig${hiLite ? ' q' : ''}" data-code="${r.code}" data-market="${S.market}" data-qualified="${r.qualified ? 1 : 0}" style="animation-delay:${Math.min(i * 50, 400)}ms">
     <div class="sig-top">
       <div><div class="nm">${r.name}${qBadge}${fgBadge}<span data-edge-host>${evBadge}</span></div><div class="cd">${r.code}</div></div>
       <div class="sig-top-right"><span class="px" data-px>${price}</span>
         <span class="chg ${clsOf(r.chg)}" data-chg>${chgText}</span>
-        <span class="score-badge">${isFlag ? (r.flag_quality || "ok") : r.score}</span></div>
+        <span class="score-badge">${isFlag ? (r.flag_quality || "ok") : isTl ? (r.tl_quality || "none") : r.score}</span></div>
     </div>
     <div class="sig-chart"><canvas height="264" data-code="${r.code}" data-market="${S.market}"></canvas><div class="tip" data-code="${r.code}"></div></div>
     <div class="sig-line">
@@ -723,12 +802,16 @@ async function loadChart(code, market) {
   const fam = (d.pattern_family || currentFamily());
   if (boxEl && fam === "high_flag" && d.flag && d.flag.pattern === "high_flag") {
     boxEl.textContent = `旗面 ${fmt2(d.flag.handle_low)}–${fmt2(d.flag.handle_high)} · ${d.flag.flag_quality || ""}`;
+  } else if (boxEl && fam === "trendline" && d.trendline) {
+    boxEl.textContent = tlMetricsText(d.trendline);
   } else if (boxEl && d.box) {
     boxEl.textContent = boxLineText({ ...d.box, box_mode: d.box_mode || d.box.box_mode || "classic" });
   }
   const host = card && card.querySelector("[data-edge-host]");
   if (host && fam === "high_flag" && d.flag) {
     host.innerHTML = "";
+  } else if (host && fam === "trendline" && d.trendline) {
+    host.innerHTML = tlBadgeHTML(d.trendline.tl_event);
   } else if (host && d.box) host.innerHTML = edgeBadgeHTML(d.box.edge_event);
 }
 function observeCardCharts() {
@@ -751,6 +834,25 @@ function observeCardCharts() {
   canvases.forEach(cv => chartObserver.observe(cv));
 }
 
+function strokeTl(ctx, bars, points, y, col, padL, step) {
+  const idx = {};
+  bars.forEach((b, i) => { idx[b.date] = i; });
+  const seq = (points || []).filter(p => p && p.date in idx && p.price != null);
+  if (seq.length < 2) return;
+  ctx.save();
+  ctx.setLineDash([5, 4]);
+  ctx.strokeStyle = col;
+  ctx.beginPath();
+  seq.forEach((p, n) => {
+    const i = idx[p.date];
+    const x = padL + i * step + step / 2;
+    const yy = y(Number(p.price));
+    if (n === 0) ctx.moveTo(x, yy); else ctx.lineTo(x, yy);
+  });
+  ctx.stroke();
+  ctx.restore();
+}
+
 function drawChart(cv, d) {
   const code = cv.dataset.code;
   const market = cv.dataset.market || "stock";
@@ -765,6 +867,8 @@ function drawChart(cv, d) {
   const box = d.box || {};
   const rejected = boxQualityRejected(box.box_quality);
   const ch = (!rejected && channelSeries(box, bars)) || null;
+  const tln = d.trendline || {};
+  const family = d.pattern_family || currentFamily();
   let lo = Infinity, hi = -Infinity, vmax = 0;
   bars.forEach(b => { lo = Math.min(lo, b.low); hi = Math.max(hi, b.high); vmax = Math.max(vmax, b.vol); });
   if (ch) {
@@ -772,11 +876,15 @@ function drawChart(cv, d) {
     ch.down.forEach(v => { if (v != null) { hi = Math.max(hi, v); lo = Math.min(lo, v); } });
     ch.mid.forEach(v => { if (v != null) { hi = Math.max(hi, v); lo = Math.min(lo, v); } });
   }
+  if (family === "trendline") {
+    (((tln.tl_points || {}).support) || []).concat(((tln.tl_points || {}).resistance) || []).forEach(p => {
+      if (p && p.price != null) { hi = Math.max(hi, Number(p.price)); lo = Math.min(lo, Number(p.price)); }
+    });
+  }
   const span = (hi - lo) || 1e-9;
   const n = bars.length, step = (W - padL - padR) / n, bw = Math.max(1, Math.min(8, step * 0.62));
   const y = v => padT + (hi - v) / span * vh;
   const flag = d.flag || {};
-  const family = d.pattern_family || currentFamily();
   ctx.clearRect(0, 0, W, H);
   ctx.font = "10px IBM Plex Mono, monospace";
   ctx.lineWidth = 1;
@@ -800,6 +908,26 @@ function drawChart(cv, d) {
       const px = padL + flag.pole_index * step + step / 2;
       ctx.fillStyle = "rgba(155,213,151,.18)";
       ctx.fillRect(px - Math.max(2, bw), padT, Math.max(4, bw * 2), vh);
+    }
+  } else if (family === "trendline") {
+    const pts = tln.tl_points || {};
+    strokeTl(ctx, bars, pts.support, y, "#8FC98B", padL, step);
+    strokeTl(ctx, bars, pts.resistance, y, "#F07A63", padL, step);
+    if (tln.tl_support && tln.tl_support.L_now != null) {
+      ctx.fillStyle = "#8FC98B";
+      ctx.fillText("支撑 " + priceFmt(Number(tln.tl_support.L_now)), padL + 2, Math.min(padT + vh - 2, y(Number(tln.tl_support.L_now)) + 12));
+    }
+    if (tln.tl_resistance && tln.tl_resistance.L_now != null) {
+      ctx.fillStyle = "#F07A63";
+      ctx.fillText("压力 " + priceFmt(Number(tln.tl_resistance.L_now)), padL + 2, Math.max(padT + 10, y(Number(tln.tl_resistance.L_now)) - 4));
+    }
+    if (tln.tl_event_bar) {
+      const bi = bars.findIndex(b => b.date === tln.tl_event_bar);
+      if (bi >= 0) {
+        const px = padL + bi * step + step / 2;
+        ctx.fillStyle = tln.tl_event === "support_break" ? "rgba(240,122,99,.22)" : "rgba(155,213,151,.22)";
+        ctx.fillRect(px - Math.max(2, bw), padT, Math.max(4, bw * 2), vh);
+      }
     }
   } else if (!rejected && ch) {
     const xs = bars.map((_, i) => padL + i * step + step / 2);
@@ -869,6 +997,13 @@ function drawChart(cv, d) {
       if (flag.pole_index === i) flagLab = "Pole 放量突破";
       else if (flag.handle_start != null && i >= flag.handle_start && i <= flag.handle_end) flagLab = "旗面整理";
       if (flag.flag_stage === "secondary_buy" && i === n - 1) flagLab = "二次买点";
+    }
+    if (family === "trendline") {
+      if (tln.tl_event_bar === b.date) flagLab = tlEventLabel(tln.tl_event) || flagLab;
+      else if (tln.tl_support && tln.tl_support.date1 === b.date) flagLab = "支撑锚点";
+      else if (tln.tl_support && tln.tl_support.date2 === b.date) flagLab = "支撑锚点";
+      else if (tln.tl_resistance && tln.tl_resistance.date1 === b.date) flagLab = "压力锚点";
+      else if (tln.tl_resistance && tln.tl_resistance.date2 === b.date) flagLab = "压力锚点";
     }
     const extra = flagLab || evLab;
     tip.innerHTML = `<b>${b.date}</b><br>开 ${priceFmt(b.open)} · 高 ${priceFmt(b.high)}<br>` +
@@ -1035,7 +1170,7 @@ const BOX_MODE_TOAST = {
 
 async function setBoxMode(mode) {
   if (mode !== "classic" && mode !== "p0" && mode !== "p1") return;
-  if (currentFamily() === "high_flag") return;
+  if (currentFamily() !== "box") return;
   const prev = (S.cfg && S.cfg.box_mode) || "classic";
   if (prev === mode) return;
   try {
@@ -1052,10 +1187,11 @@ async function setBoxMode(mode) {
 const FAMILY_TOAST = {
   box: "形态：箱体/通道。K 线按箱体绘制；评分需强制重扫后更新",
   high_flag: "形态：高位旗形(杯柄)。请强制重扫以批量筛选旗面/二次买点",
+  trendline: "形态：趋势线。请强制重扫以筛选支撑/压力与刚跌破、刚突破",
 };
 
 async function setPatternFamily(fam) {
-  if (fam !== "box" && fam !== "high_flag") return;
+  if (fam !== "box" && fam !== "high_flag" && fam !== "trendline") return;
   const prev = currentFamily();
   if (prev === fam) return;
   try {
@@ -1073,6 +1209,13 @@ function setFlagFilter(flt) {
   if (flt !== "all" && flt !== "handle" && flt !== "secondary_buy") return;
   if (S.flagFilter === flt) return;
   S.flagFilter = flt;
+  renderAll();
+}
+
+function setTlFilter(flt) {
+  if (flt !== "all" && flt !== "support_break" && flt !== "resistance_break") return;
+  if (S.tlFilter === flt) return;
+  S.tlFilter = flt;
   renderAll();
 }
 
@@ -1114,6 +1257,9 @@ function boot() {
   });
   document.querySelectorAll("#flagFilterTabs .tab").forEach(t => {
     t.addEventListener("click", () => setFlagFilter(t.dataset.flagFilter));
+  });
+  document.querySelectorAll("#tlFilterTabs .tab").forEach(t => {
+    t.addEventListener("click", () => setTlFilter(t.dataset.tlFilter));
   });
   refresh().then(() => {
     refreshQuotes();

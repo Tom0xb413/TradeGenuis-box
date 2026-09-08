@@ -8,7 +8,7 @@
   2. 倍量启动持续≥3日 —— 腾讯前复权日K：成交量 ≥ 前 5 日均量 1.8 倍的连续天数
   3. 主力资金持续流入+高度控盘 —— 东财资金流（近5日主力净流入）+ 股东户数环比（筹码集中度）
   4. 箱体上沿试盘≥3次 —— 日K自动识别箱体（classic / p0 / p1 斜向通道，见 box_engine.py）
-形态族 pattern_family：box（默认，四条件箱体）| high_flag（高位旗形/杯柄，见 pattern_flag.py）
+形态族 pattern_family：box（默认，四条件箱体）| high_flag（高位旗形/杯柄，见 pattern_flag.py）| trendline（趋势线，见 pattern_trendline.py）
 
 数据源（全部公开接口，无需 Key；东财 push2 不可用时自动降级）：
   日K/现价 ：web.ifzq.gtimg.cn（腾讯）  备用 hq.sinajs.cn / money.finance.sina.com.cn
@@ -60,6 +60,10 @@ from pattern_flag import (
     detect_high_flag,
     flag_row_fields,
     normalize_pattern_family,
+)
+from pattern_trendline import (
+    detect_trendline,
+    trendline_row_fields,
 )
 
 # --------------------------------------------------------------------------- #
@@ -971,6 +975,7 @@ def analyze(code: str, name: str, theme_hint: str,
         "volume_days": vol["volume_days"],
         **box_row_fields(box, mode),
         **flag_row_fields(detect_high_flag(bars)),
+        **trendline_row_fields(detect_trendline(bars)),
         "fund_5d": fund["fund_5d"],
         "inflow_days": fund["inflow_days"],
         "fund_state": fund["fund_state"],
@@ -1013,6 +1018,7 @@ def run_scan(network: bool = True, progress=None, workers: int | None = None) ->
                 "theme_ok": False, "volume_days": 0, "volume_ratio": 0.0,
                 **box_row_fields(None, box_mode),
                 **flag_row_fields(None),
+                **trendline_row_fields(None),
                 "fund_state": "无数据", "control": "—", "error": str(e)[:120],
                 "flags": [f"数据错误:{str(e)[:40]}", 0],
             })
@@ -1350,6 +1356,7 @@ def analyze_market(s: dict, hot_names: set[str], box_mode: str | None = None) ->
             "volume_days": vol["volume_days"],
             **box_row_fields(box, mode),
             **flag_row_fields(detect_high_flag(bars)),
+            **trendline_row_fields(detect_trendline(bars)),
             "fund_5d": fund["fund_5d"],
             "inflow_days": fund["inflow_days"],
             "fund_state": fund["fund_state"],
@@ -1456,7 +1463,12 @@ def run_market_scan(full: bool = True, top: int = MARKET_TOP,
                  box_mode=box_mode, pattern_family=pattern_family)
     skipped = n_picked - len(rows)
     n_flag = sum(1 for r in rows if r.get("pattern") == "high_flag")
-    extra = f"，旗形 {n_flag} 只" if pattern_family == "high_flag" else ""
+    n_tl = sum(1 for r in rows if r.get("tl_has_line"))
+    extra = ""
+    if pattern_family == "high_flag":
+        extra = f"，旗形 {n_flag} 只"
+    elif pattern_family == "trendline":
+        extra = f"，趋势线 {n_tl} 只"
     emit_progress(progress, f"完成：有效评分 {len(rows)} 只（数据不足跳过 {skipped} 只），"
                   f"达标 {sum(1 for r in rows if r.get('qualified'))} 只{extra}",
                   phase="save", done=n_picked, total=n_picked)
@@ -1638,6 +1650,7 @@ def analyze_crypto(sym: str, price: float, chg: float,
         "volume_days": vol["volume_days"],
         **box_row_fields(box, mode),
         **flag_row_fields(detect_high_flag(bars)),
+        **trendline_row_fields(detect_trendline(bars)),
         # 币圈无资金流/控盘/热点 → 恒空，对应条件按币圈口径折中给分
         "fund_5d": None, "inflow_days": 0, "fund_state": "—",
         "control": "—", "holder_ratio": None, "control_note": "",

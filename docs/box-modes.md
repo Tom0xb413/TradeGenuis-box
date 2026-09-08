@@ -12,7 +12,7 @@
 
 四条件 100 分制**不因模式改权重**：P0/P1 只改变箱体几何与 `tests` 计数，评分仍用 `tests≥3` 等原规则。
 
-形态族 `pattern_family`（`box` | `high_flag`）是另一层开关：`box` 时本文件的模式全部有效；`high_flag` 时走旗形检测，见 [pattern-high-flag.md](pattern-high-flag.md)。缓存身份同时包含 `pattern_family`。
+形态族 `pattern_family`（`box` | `high_flag` | `trendline`）是另一层开关：`box` 时本文件的模式全部有效；`high_flag` 时走旗形检测，见 [pattern-high-flag.md](pattern-high-flag.md)；`trendline` 时走趋势线检测，见 [pattern-trendline.md](pattern-trendline.md)。缓存身份同时包含 `pattern_family`。
 
 ## classic（默认）
 

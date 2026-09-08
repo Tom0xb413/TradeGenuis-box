@@ -8,12 +8,13 @@
 
 与 `box_engine` 的 classic/p0/p1 箱体四条件评分互相独立；本模块只产出
 旗形字段，不改 100 分制。A 股与币圈共用同一套 OHLCV 规则。
+趋势线形态族见 pattern_trendline.py（`pattern_family=trendline`）。
 
 定稿参数见模块常量与 docs/pattern-high-flag.md。
 """
 from __future__ import annotations
 
-PATTERN_FAMILIES = ("box", "high_flag")
+PATTERN_FAMILIES = ("box", "high_flag", "trendline")
 DEFAULT_PATTERN_FAMILY = "box"
 
 # --------------------------------------------------------------------------- #

@@ -45,7 +45,7 @@ DEFAULT_CONFIG = {
     "tg_token": "",
     "tg_chat": "",
     "box_mode": "classic",              # classic | p0 | p1（斜向通道）
-    "pattern_family": "box",            # box | high_flag（默认 box，不打断现有用户）
+    "pattern_family": "box",            # box | high_flag | trendline（默认 box，不打断现有用户）
     "scan_workers": sc.SCAN_WORKERS_DEFAULT,  # 4–32，亦可用环境变量 SCAN_WORKERS
 }
 
@@ -620,7 +620,7 @@ def _kline_disk_put(market: str, code: str, payload: dict) -> None:
 
 
 def _with_box(payload: dict) -> dict:
-    """按当前配置现算 box + 旗形叠加，使 K 线与卡片形态族一致；不改缓存里的 bars。"""
+    """按当前配置现算 box + 旗形 + 趋势线叠加，使 K 线与卡片形态族一致；不改缓存里的 bars。"""
     if not _valid_kline_payload(payload):
         return payload
     mode = configured_box_mode()
@@ -629,6 +629,7 @@ def _with_box(payload: dict) -> dict:
     out["box"] = sc.compute_box(out.get("bars") or [], mode=mode)
     out["box_mode"] = mode
     out["flag"] = sc.detect_high_flag(out.get("bars") or [])
+    out["trendline"] = sc.detect_trendline(out.get("bars") or [])
     out["pattern_family"] = family
     return out
 
