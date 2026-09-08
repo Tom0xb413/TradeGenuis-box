@@ -7,7 +7,7 @@
 ## 产品特性
 
 - **A股全市场扫描**：沪深 5000+ 只逐一深度计算，无粗筛（`--market`），也可量比粗筛快扫（`--quick`）
-- **加密货币扫描**：Binance USDT 永续期货，过去 24h 涨幅前 30 自动进池子，复用同一套箱体引擎
+- **加密货币 / 全球池扫描**：USDT 永续 24h 涨幅前 **20** + 黄金 + 美股指数 + 固定约 20 只美股；K 线周期可选 **4h / 8h / 1d**（默认 1d）。复用同一套箱体/旗形/趋势线引擎。详见 [docs/crypto-global-pool.md](docs/crypto-global-pool.md)
 - **四条件机械打分**（A股各 25 分，≥85 达标）：
   1. 热点题材 —— 当日涨幅前 3 概念板块 + 用户自定义关注板块
   2. 倍量启动 ≥3 日 —— 量 ≥ 前 5 日均量 1.8 倍连续计数
@@ -65,11 +65,11 @@ python3 server.py               # ② 启动看板 → http://127.0.0.1:8808
 ```bash
 python3 scanner.py --market     # A股：沪深全市场逐一深度计算
 python3 scanner.py --market --quick   # A股快扫：量比粗筛 TOP 200
-python3 scanner.py --crypto     # 币圈：Binance 24h 涨幅前 30 进池，箱体引擎复用
+python3 scanner.py --crypto     # 全球池：永续涨幅前 20 + 黄金 + 美股指数/个股
 python3 scanner.py              # 自选池（data/pool.json）
 ```
 
-看板顶部横幅可一键切换 **A股 / 加密货币** 两个 tab；扫描按钮随 tab 自动切换目标市场。币圈主源为 Binance USDT 永续，国内网络超时则自动改走 Gate.io。
+看板顶部横幅可一键切换 **A股 / 加密货币** 两个 tab；扫描按钮随 tab 自动切换目标市场。加密货币 Tab 为全球混合池（币 TOP20 + 黄金 + 指数 + 美股），主源仍为 Binance USDT 永续，国内网络超时则自动改走 Gate.io；美股/指数/部分黄金走 Yahoo chart（失败则跳过该票）。周期胶囊 **4h / 8h / 1日** 写入 `crypto_interval`。
 
 ### 扫描并发 `scan_workers`
 
@@ -118,6 +118,8 @@ python3 scanner.py --push        # 扫描并推送
 | `docs/box-modes.md` | 箱体模式参数（含 P1 定稿） |
 | `docs/pattern-high-flag.md` | 高位旗形参数与 Bull Flag / 杯柄 / 突破中继 |
 | `docs/pattern-trendline.md` | 趋势线参数与 Tom 图例（价格×时间边界） |
+| `global_pool.py` | 全球池常量、周期规范化、Yahoo chart、1h→4h/8h 重采样 |
+| `docs/crypto-global-pool.md` | 全球池宇宙、周期、黄金符号、缓存规则 |
 | `data/pool.json` | 自选池（`code` 必填） |
 | `data/sectors.json` | 用户自定义关注板块 |
 | `data/*.json` | 扫描结果与缓存（自动生成，已在 .gitignore） |
@@ -126,7 +128,7 @@ python3 scanner.py --push        # 扫描并推送
 
 ## 说明与风险
 
-- 行情/资金/户数来自公开接口（腾讯、新浪、东方财富、Binance、Gate.io），有延迟，盘中为实时快照；东财 push2 在部分国内 VPS 上会断开，脚本含新浪分市场、腾讯 K 线、AKShare（非 push2）与 Gate.io 多源兜底
+- 行情/资金/户数来自公开接口（腾讯、新浪、东方财富、Binance、Gate.io、Yahoo Finance chart），有延迟，盘中为实时快照；东财 push2 在部分国内 VPS 上会断开，脚本含新浪分市场、腾讯 K 线、AKShare（非 push2）与 Gate.io 多源兜底。Yahoo 超时则跳过该美股/指数/黄金，不中止整轮扫描
 - 部分 AKShare 接口（资金流/股东户数）底层仍可能访问东财数据中心（非 push2）；失败时该条件按「无数据」弱化打分，不中止整轮扫描
 - 箱体、倍量、试盘均为机械规则近似；股东户数为季度披露，是筹码集中度的**代理指标**且滞后
 - 超短线假突破风险高，请自行控制仓位与止损。历史表现不代表未来收益，本项目不构成投资建议

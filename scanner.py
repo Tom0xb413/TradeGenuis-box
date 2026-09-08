@@ -16,7 +16,9 @@
   股东户数 ：datacenter-web.eastmoney.com  备用 AKShare
   热点概念 ：push2.eastmoney.com clist + emweb F10  备用 AKShare（新浪概念 / 同花顺）
   全市场名单：东财 clist  备用新浪 sh_a+sz_a（不用 hs_a）  再备用 AKShare 官方名单
-  币圈     ：Binance USDT 永续  失败后粘性回退 Gate.io USDT 永续
+  币圈 Tab ：USDT 永续 TOP20 + 黄金 + 美股指数 + 固定美股（见 global_pool.py）
+             Binance USDT 永续失败后粘性回退 Gate.io；美股/指数/部分黄金走 Yahoo chart
+             K 线周期 crypto_interval：4h | 8h | 1d（默认 1d）
 
 用法：
   pip install requests
@@ -65,6 +67,19 @@ from pattern_trendline import (
     detect_trendline,
     trendline_row_fields,
 )
+from global_pool import (
+    CRYPTO_INTERVALS,
+    CRYPTO_TOP_N,
+    DEFAULT_CRYPTO_INTERVAL,
+    GOLD_CRYPTO_SYMBOLS,
+    GOLD_DISPLAY_NAME,
+    GOLD_YAHOO_SYMBOLS,
+    build_global_pool,
+    fetch_yahoo_instrument,
+    format_bar_date,
+    is_yahoo_symbol,
+    normalize_crypto_interval,
+)
 
 # --------------------------------------------------------------------------- #
 # 常量 / 配置
@@ -76,8 +91,8 @@ WATCH_FILE = DATA / "watchlist.json"    # 扫描结果（自动生成）
 BJT = timezone(timedelta(hours=8))
 
 HOT_TOP_N = 10          # 热点概念板块取当日涨幅前 N 名（同时用于打分与板块筛选）
-CRYPTO_TOP_N = 30       # 币圈：过去24h涨幅前 N 进入池子
-CRYPTO_LOOKBACK = 200    # 币圈K线根数（日线）
+# CRYPTO_TOP_N 定义在 global_pool.py（加密货币 Tab 涨幅榜取前 N，当前 20）
+CRYPTO_LOOKBACK = 200    # 币圈/全球池 K 线根数（随 crypto_interval 截取）
 VOL_MULT = 1.8          # 倍量阈值（对前5日均量）
 VOL_DAYS_REQ = 3        # 连续放量最少天数
 FUND_DAYS = 5           # 资金流观察天数
@@ -296,6 +311,8 @@ def decorate_scan_payload(payload: dict) -> dict:
         payload["box_mode"] = load_box_mode()
     if "pattern_family" not in payload:
         payload["pattern_family"] = load_pattern_family()
+    if payload.get("scope") == "crypto" and "crypto_interval" not in payload:
+        payload["crypto_interval"] = load_crypto_interval()
     return payload
 
 
@@ -315,6 +332,15 @@ def load_pattern_family() -> str:
         return normalize_pattern_family(cfg.get("pattern_family"))
     except Exception:
         return DEFAULT_PATTERN_FAMILY
+
+
+def load_crypto_interval() -> str:
+    """读取 data/config.json 的 crypto_interval；缺省 1d。仅加密货币 Tab 扫描/K线使用。"""
+    try:
+        cfg = json.loads((DATA / "config.json").read_text(encoding="utf-8"))
+        return normalize_crypto_interval(cfg.get("crypto_interval"))
+    except Exception:
+        return DEFAULT_CRYPTO_INTERVAL
 
 
 def is_trading_time() -> bool:
@@ -1576,29 +1602,31 @@ def _gate_tickers() -> list[dict]:
 
 def fetch_crypto_kline(symbol: str, limit: int = CRYPTO_LOOKBACK,
                        interval: str = "1d") -> list[dict]:
-    """永续日K。Binance 失败后本轮粘性改走 Gate.io。"""
+    """永续 K 线。Binance 失败后本轮粘性改走 Gate.io。interval 已规范为 4h/8h/1d。"""
+    iv = normalize_crypto_interval(interval)
     if _crypto_backend != "gate":
         try:
-            bars = _binance_klines(symbol, limit, interval)
+            bars = _binance_klines(symbol, limit, iv)
             if bars:
                 return bars
         except Exception:
             _mark_crypto_gate()
-            return _gate_klines(symbol, limit, interval)
-    return _gate_klines(symbol, limit, interval)
+            return _gate_klines(symbol, limit, iv)
+    return _gate_klines(symbol, limit, iv)
 
 
 def _binance_klines(symbol: str, limit: int, interval: str) -> list[dict]:
+    iv = normalize_crypto_interval(interval)
     d = http_json(
         f"{BINANCE_FUTURES}/fapi/v1/klines?symbol={norm_crypto_symbol(symbol)}"
-        f"&interval={interval}&limit={limit}",
+        f"&interval={iv}&limit={limit}",
         timeout=15,
     )
     bars = []
     for k in d or []:
         try:
             bars.append({
-                "date": datetime.fromtimestamp(k[0] / 1000).strftime("%Y-%m-%d"),
+                "date": format_bar_date(k[0] / 1000, iv),
                 "open": float(k[1]), "close": float(k[4]),
                 "high": float(k[2]), "low": float(k[3]),
                 "vol": float(k[5]),
@@ -1609,9 +1637,11 @@ def _binance_klines(symbol: str, limit: int, interval: str) -> list[dict]:
 
 
 def _gate_klines(symbol: str, limit: int, interval: str) -> list[dict]:
+    # Gate USDT 永续 candlesticks 与 Binance 一样使用 4h / 8h / 1d 字符串（另有 1h、1m 等）
+    iv = normalize_crypto_interval(interval)
     d = http_json(
         f"{GATE_FUTURES}/candlesticks?contract={gate_contract(symbol)}"
-        f"&interval={interval}&limit={limit}",
+        f"&interval={iv}&limit={limit}",
         timeout=15,
     )
     bars = []
@@ -1624,7 +1654,7 @@ def _gate_klines(symbol: str, limit: int, interval: str) -> list[dict]:
             low = k.get("l") if isinstance(k, dict) else k[3]
             v = k.get("v") if isinstance(k, dict) else k[5]
             bars.append({
-                "date": datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d"),
+                "date": format_bar_date(float(ts), iv),
                 "open": float(o), "close": float(c),
                 "high": float(h), "low": float(low),
                 "vol": float(v or 0),
@@ -1635,23 +1665,89 @@ def _gate_klines(symbol: str, limit: int, interval: str) -> list[dict]:
     return bars
 
 
+def fetch_tab_kline(code: str, interval: str | None = None,
+                    source: str | None = None,
+                    limit: int = CRYPTO_LOOKBACK) -> list[dict]:
+    """加密货币 Tab 内任意标的的 K 线：永续走币所，其余走 Yahoo。"""
+    iv = normalize_crypto_interval(interval or load_crypto_interval())
+    src = (source or "").lower()
+    if src == "yahoo" or (src != "crypto" and is_yahoo_symbol(code)):
+        inst = fetch_yahoo_instrument(code, interval=iv, lookback=limit)
+        return list((inst or {}).get("bars") or [])
+    return fetch_crypto_kline(code, limit=limit, interval=iv)
+
+
+def resolve_gold_instrument(tickers: list[dict] | None = None,
+                            interval: str = "1d") -> dict | None:
+    """
+    选 1 只黄金：先看 24h ticker 里的 XAUUSDT/PAXGUSDT，再探测永续 K 线，
+    最后 Yahoo GC=F / GLD。全部失败返回 None（扫描跳过黄金，不中止）。
+    """
+    iv = normalize_crypto_interval(interval)
+    ticker_map = {}
+    for t in tickers or []:
+        sym = norm_crypto_symbol(str(t.get("symbol") or t.get("code") or ""))
+        if sym:
+            ticker_map[sym] = t
+    for sym in GOLD_CRYPTO_SYMBOLS:
+        t = ticker_map.get(sym)
+        if t and (t.get("price") or 0) > 0:
+            return {
+                "code": sym, "name": GOLD_DISPLAY_NAME,
+                "price": t.get("price"), "chg": t.get("chg"),
+                "asset_class": "gold", "market": "crypto", "source": "crypto",
+            }
+    for sym in GOLD_CRYPTO_SYMBOLS:
+        try:
+            bars = fetch_crypto_kline(sym, limit=8, interval="1d")
+            if len(bars) < 2:
+                continue
+            px = bars[-1]["close"]
+            prev = bars[-2]["close"]
+            chg = ((px - prev) / prev * 100.0) if prev else 0.0
+            return {
+                "code": sym, "name": GOLD_DISPLAY_NAME,
+                "price": px, "chg": chg,
+                "asset_class": "gold", "market": "crypto", "source": "crypto",
+            }
+        except Exception:
+            continue
+    for ysym in GOLD_YAHOO_SYMBOLS:
+        try:
+            inst = fetch_yahoo_instrument(ysym, interval=iv, lookback=8)
+            if not inst or not inst.get("bars"):
+                continue
+            return {
+                "code": ysym, "name": GOLD_DISPLAY_NAME,
+                "price": inst.get("price"), "chg": inst.get("chg"),
+                "asset_class": "gold", "market": "crypto", "source": "yahoo",
+            }
+        except Exception:
+            continue
+    return None
+
+
 def analyze_crypto(sym: str, price: float, chg: float,
-                   bars: list[dict], box_mode: str | None = None) -> dict | None:
-    """复用同一套箱体/倍量/试盘引擎，币圈无板块、无主力资金/股东户数。"""
+                   bars: list[dict], box_mode: str | None = None,
+                   *, name: str | None = None, asset_class: str = "crypto",
+                   source: str = "crypto") -> dict | None:
+    """复用同一套箱体/倍量/试盘引擎。market 仍为 crypto（看板 Tab）；asset_class 区分币/金/指数/美股。"""
     if len(bars) < 40:
         return None
     mode = normalize_box_mode(box_mode or load_box_mode())
     vol = compute_volume(bars)
     box = compute_box(bars, mode=mode)
     row = {
-        "code": sym, "name": sym, "market": "crypto",
+        "code": sym, "name": name or sym, "market": "crypto",
+        "asset_class": asset_class or "crypto",
+        "source": source or "crypto",
         "price": price, "chg": chg,
         "turnover": None, "volume_ratio": vol["volume_ratio"],
         "volume_days": vol["volume_days"],
         **box_row_fields(box, mode),
         **flag_row_fields(detect_high_flag(bars)),
         **trendline_row_fields(detect_trendline(bars)),
-        # 币圈无资金流/控盘/热点 → 恒空，对应条件按币圈口径折中给分
+        # 全球池无 A 股资金流/控盘/热点 → 走币圈 3 条件口径
         "fund_5d": None, "inflow_days": 0, "fund_state": "—",
         "control": "—", "holder_ratio": None, "control_note": "",
         "theme_hint": "", "theme_ok": False, "hot_boards": [], "concepts": [],
@@ -1663,47 +1759,109 @@ def analyze_crypto(sym: str, price: float, chg: float,
 
 def run_crypto_scan(top: int = CRYPTO_TOP_N, workers: int | None = None,
                     progress=None) -> list[dict]:
-    """币圈扫描：24h 涨幅 top N 进池 → 复用箱体引擎打分。"""
+    """全球池扫描：币 TOP N + 黄金 + 指数 + 美股，复用箱体/旗形/趋势线引擎。"""
     n_workers = resolve_scan_workers(workers)
     reset_crypto_backend()
     box_mode = load_box_mode()
     pattern_family = load_pattern_family()
+    interval = load_crypto_interval()
     emit_progress(progress, "拉取 USDT 永续 24h 行情（Binance，失败则 Gate.io）…",
                   phase="universe", done=0, total=0)
-    tickers = fetch_crypto_tickers()
+    tickers: list[dict] = []
+    try:
+        tickers = fetch_crypto_tickers()
+    except Exception as e:
+        emit_progress(progress, f"永续行情失败，仅扫描黄金/指数/美股：{str(e)[:80]}",
+                      phase="universe", done=0, total=0)
+        tickers = []
     src = "Gate.io" if _crypto_backend == "gate" else "Binance"
-    pool = tickers[:top]
-    emit_progress(progress, f"{src} 24h 涨幅前 {len(pool)} 进入池子，形态 {pattern_family}，"
-                  f"箱体模式 {box_mode}，开始扫描（{n_workers} 线程）…",
+    gold = resolve_gold_instrument(tickers, interval=interval)
+    pool = build_global_pool(tickers, top_n=top, gold=gold)
+    gold_note = ""
+    if gold:
+        gold_note = f"黄金 {gold.get('code')}({gold.get('source')})"
+    else:
+        gold_note = "黄金不可用（已跳过）"
+    emit_progress(progress, f"{src} TOP{min(top, len(tickers))} + {gold_note} + 指数/美股，"
+                  f"共 {len(pool)} 只，周期 {interval}，形态 {pattern_family}，"
+                  f"箱体 {box_mode}，开始扫描（{n_workers} 线程）…",
                   phase="analyze", done=0, total=len(pool))
 
     rows, done = [], 0
+    skipped = 0
     lock = threading.Lock()
     n_pool = len(pool)
 
-    def one(sym: str, price: float, chg: float):
-        nonlocal done
+    def one(item: dict):
+        nonlocal done, skipped
+        code = item.get("code") or ""
         try:
-            bars = fetch_crypto_kline(sym)
-            return analyze_crypto(sym, price, chg, bars, box_mode=box_mode)
+            source = item.get("source") or "crypto"
+            if source == "yahoo" or is_yahoo_symbol(code):
+                inst = fetch_yahoo_instrument(code, interval=interval, lookback=CRYPTO_LOOKBACK)
+                if not inst:
+                    with lock:
+                        skipped += 1
+                    return None
+                bars = inst.get("bars") or []
+                name = item.get("name") if item.get("asset_class") in ("gold", "us_index") else (inst.get("name") or item.get("name") or code)
+                if item.get("asset_class") == "gold":
+                    name = GOLD_DISPLAY_NAME
+                px = inst.get("price") if inst.get("price") is not None else item.get("price")
+                chg = inst.get("chg") if inst.get("chg") is not None else item.get("chg")
+                if px is None and bars:
+                    px = bars[-1]["close"]
+                if chg is None and len(bars) >= 2 and bars[-2]["close"]:
+                    chg = (bars[-1]["close"] - bars[-2]["close"]) / bars[-2]["close"] * 100.0
+                return analyze_crypto(
+                    code, float(px or 0), float(chg or 0), bars, box_mode=box_mode,
+                    name=name, asset_class=item.get("asset_class") or "us_stock",
+                    source="yahoo",
+                )
+            bars = fetch_crypto_kline(code, limit=CRYPTO_LOOKBACK, interval=interval)
+            px = item.get("price")
+            chg = item.get("chg")
+            if px is None and bars:
+                px = bars[-1]["close"]
+            if chg is None and len(bars) >= 2 and bars[-2]["close"]:
+                chg = (bars[-1]["close"] - bars[-2]["close"]) / bars[-2]["close"] * 100.0
+            row = analyze_crypto(
+                code, float(px or 0), float(chg or 0), bars, box_mode=box_mode,
+                name=item.get("name") or code,
+                asset_class=item.get("asset_class") or "crypto",
+                source="crypto",
+            )
+            if row is None:
+                with lock:
+                    skipped += 1
+            return row
+        except Exception:
+            with lock:
+                skipped += 1
+            return None
         finally:
             with lock:
                 done += 1
                 n_done = done
-            emit_progress(progress, f"币圈扫描 {n_done}/{n_pool}",
+            emit_progress(progress, f"全球池扫描 {n_done}/{n_pool}",
                           phase="analyze", done=n_done, total=n_pool)
 
-    with ThreadPoolExecutor(max_workers=n_workers) as ex:
-        futs = [ex.submit(one, t["symbol"], t["price"], t["chg"]) for t in pool]
-        for f in as_completed(futs):
-            try:
-                r = f.result()
-                if r:
-                    rows.append(r)
-            except Exception:
-                pass
+    if n_pool:
+        with ThreadPoolExecutor(max_workers=n_workers) as ex:
+            futs = [ex.submit(one, t) for t in pool]
+            for f in as_completed(futs):
+                try:
+                    r = f.result()
+                    if r:
+                        rows.append(r)
+                except Exception:
+                    pass
 
     rows.sort(key=lambda r: (r.get("score") or 0, r.get("chg") or 0), reverse=True)
+
+    def _count(cls: str) -> int:
+        return sum(1 for r in rows if r.get("asset_class") == cls)
+
     payload = decorate_scan_payload({
         "as_of": now_str(),
         "strategy": "箱体突破战法",
@@ -1712,16 +1870,26 @@ def run_crypto_scan(top: int = CRYPTO_TOP_N, workers: int | None = None,
         "screened": len(pool),
         "scored": len(rows),
         "scanned": len(pool),
+        "skipped": skipped,
         "done": True,
         "box_mode": box_mode,
         "pattern_family": pattern_family,
+        "crypto_interval": interval,
         "hot_topics": [],
         "candidates": rows,
         "source": "gate" if _crypto_backend == "gate" else "binance",
+        "gold": ({"code": gold["code"], "source": gold.get("source")} if gold else None),
+        "pool_counts": {
+            "crypto": _count("crypto"),
+            "gold": _count("gold"),
+            "us_index": _count("us_index"),
+            "us_stock": _count("us_stock"),
+        },
     })
     DATA.mkdir(parents=True, exist_ok=True)
     CRYPTO_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    emit_progress(progress, f"币圈完成：有效评分 {len(rows)} 只，达标 {sum(1 for r in rows if r.get('qualified'))} 只",
+    emit_progress(progress, f"全球池完成：有效 {len(rows)} 只（跳过 {skipped}），"
+                  f"达标 {sum(1 for r in rows if r.get('qualified'))} 只，周期 {interval}",
                   phase="save", done=n_pool, total=n_pool)
     return rows
 
@@ -1838,7 +2006,7 @@ def main() -> int:
     ap.add_argument("--market", action="store_true",
                     help="全市场扫描：沪深全部 A 股逐一深度计算（无粗筛）")
     ap.add_argument("--crypto", action="store_true",
-                    help="加密货币扫描：Binance USDT 永续 24h 涨幅前 N 进池子，箱体逻辑复用")
+                    help="全球池扫描：USDT 永续 24h 涨幅前 N + 黄金 + 美股指数/个股，箱体逻辑复用")
     ap.add_argument("--quick", action="store_true",
                     help="快扫模式：量比粗筛 TOP N 后深度计算（仅配合 --market）")
     ap.add_argument("--top", type=int, default=MARKET_TOP,
