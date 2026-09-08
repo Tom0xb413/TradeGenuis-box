@@ -5,8 +5,8 @@
 
 池子构成（可改本文件顶部常量，无需改扫描主流程）：
   - CRYPTO_TOP_N 只 USDT 永续（24h 涨幅，Binance → 粘性 Gate）
-  - 黄金 1 只（优先 Gate XAUT_USDT，其次 XAUUSDT / PAXGUSDT）
-  - 美/日/韩指数 + 固定美股大盘 + 少量日韩龙头
+  - 黄金 1 只（优先 Gate XAUT_USDT 现货/永续，其次 XAUUSDT / PAXGUSDT）
+  - 美股 20 + 美指/ETF（Gate USDT 永续干净名）+ 日韩代币代理 + 日经/KOSPI 日K 次源
 
 K 线周期 crypto_interval ∈ {4h, 8h, 1d}，默认 1d。
 有 Gate 股票代币的标的：优先 USDT 永续干净名（AAPL_USDT / SPX500_USDT，VPS 实测 1d/4h/8h）；
@@ -45,55 +45,73 @@ GOLD_CRYPTO_SYMBOLS = ("XAUTUSDT", "XAUUSDT", "PAXGUSDT")
 GOLD_SPOT_PAIR = "XAUT_USDT"
 GOLD_YAHOO_SYMBOLS = ("GC=F", "GLD")  # 遗留；扫描主路径不再走 Yahoo
 
-# 美股指数：新浪 staticdata / JSONP 代码（勿用 Yahoo ^GSPC，VPS 上 Yahoo 403）。
-US_INDICES: tuple[dict, ...] = (
+# 默认美指/ETF（进默认宇宙）：SPX500 永续，禁止 SPX_USDT（梗币）与 DIA_USDT（加密 DIA）。
+US_INDEX_DEFAULT: tuple[dict, ...] = (
     {"symbol": ".INX", "name": "标普500", "znb": "SPX", "sina_symbol": ".INX"},
+)
+US_ETF_DEFAULT: tuple[dict, ...] = (
+    {"symbol": "SPY", "name": "SPY"},
+    {"symbol": "QQQ", "name": "QQQ"},
+    {"symbol": "IWM", "name": "IWM"},
+)
+# 覆盖池仍可解析道指 / 纳指综合 / 纳指100（.IXIC 无代币，走新浪）。
+US_INDICES: tuple[dict, ...] = US_INDEX_DEFAULT + (
     {"symbol": ".DJI", "name": "道指", "znb": "DJI", "sina_symbol": ".DJI"},
     {"symbol": ".IXIC", "name": "纳指", "znb": "IXIC", "sina_symbol": ".IXIC"},
     {"symbol": ".NDX", "name": "纳斯达克100", "znb": "NDX", "sina_symbol": ".NDX"},
 )
 
-# 固定约 20 只美股大盘（Sina/Naver；伯克希尔用 BRK-B → 新浪 BRK.B）。
+# 默认美股 20：VPS 表 Gate USDT 永续干净名（含 ORCL）。覆盖池仍可解析未进宇宙的映射票。
 US_STOCKS: tuple[str, ...] = (
     "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN",
-    "META", "TSLA", "BRK-B", "JPM", "V",
-    "UNH", "XOM", "JNJ", "WMT", "MA",
-    "PG", "HD", "COST", "AVGO", "NFLX",
+    "META", "TSLA", "COIN", "BABA", "NFLX",
+    "AMD", "AVGO", "ARM", "PLTR", "HOOD",
+    "MSTR", "JPM", "WMT", "IBM", "ORCL",
 )
 
-# 日/韩指数与少量龙头（改列表即改默认池）。
+# 日/韩：默认索尼/三星走 Gate 代币代理；日经/KOSPI 无代币，新浪/Naver 日K 次源。
 JP_INDICES: tuple[dict, ...] = (
     {"symbol": "NKY", "name": "日经225", "sina_gi": "NKY", "ak_name": "日经225指数"},
 )
 KR_INDICES: tuple[dict, ...] = (
     {"symbol": "KOSPI", "name": "KOSPI", "naver_code": "KOSPI", "ak_name": "首尔综合指数"},
+)
+KR_INDICES_KNOWN: tuple[dict, ...] = KR_INDICES + (
     {"symbol": "KOSDAQ", "name": "KOSDAQ", "naver_code": "KOSDAQ"},
 )
 JP_STOCKS: tuple[dict, ...] = (
-    {"symbol": "7203.T", "name": "丰田"},
     {"symbol": "6758.T", "name": "索尼"},
+)
+JP_STOCKS_KNOWN: tuple[dict, ...] = JP_STOCKS + (
+    {"symbol": "7203.T", "name": "丰田"},
 )
 KR_STOCKS: tuple[dict, ...] = (
     {"symbol": "005930", "name": "三星电子"},
+)
+KR_STOCKS_KNOWN: tuple[dict, ...] = KR_STOCKS + (
     {"symbol": "000660", "name": "SK海力士"},
 )
 
 # Gate 股票代币（2026-09 VPS 表）：优先 USDT 永续干净名；现货 *X/*G/*ON 仅回退；跳过 3L/3S。
-# 这是代币/代币代理，可能与正股有基差；不是纽交所/东证/韩交所官方行情。
-# 不映射：JPN225_USDT（标尺不对）、DIA_USDT（加密 DIA）、SPX_USDT（梗币）、WMTX（不是沃尔玛）。
+# 这是代币化加密市场 / 代币代理，与正股有基差；不是纽交所/东证/韩交所官方打印。
+# 不映射：JPN225_USDT、DIA_USDT、SPX_USDT、WMTX、TOYOTA。无 NIKKEI/KOSPI 代币。
 # Mastercard 无永续；现货 MAX_USDT 为 xStock 回退。日元丰田 7203.T 无 TOYOTA 合约。
 GATE_EQUITY_MAP: dict[str, str] = {
     "AAPL": "AAPL_USDT", "MSFT": "MSFT_USDT", "NVDA": "NVDA_USDT",
     "GOOGL": "GOOGL_USDT", "AMZN": "AMZN_USDT", "META": "META_USDT",
-    "TSLA": "TSLA_USDT", "BRK-B": "BRKB_USDT", "JPM": "JPM_USDT",
-    "V": "V_USDT", "UNH": "UNH_USDT", "XOM": "XOM_USDT",
-    "JNJ": "JNJ_USDT", "WMT": "WMT_USDT", "PG": "PG_USDT",
-    "HD": "HD_USDT", "COST": "COST_USDT", "AVGO": "AVGO_USDT",
-    "NFLX": "NFLX_USDT",
+    "TSLA": "TSLA_USDT", "COIN": "COIN_USDT", "BABA": "BABA_USDT",
+    "NFLX": "NFLX_USDT", "AMD": "AMD_USDT", "AVGO": "AVGO_USDT",
+    "ARM": "ARM_USDT", "PLTR": "PLTR_USDT", "HOOD": "HOOD_USDT",
+    "MSTR": "MSTR_USDT", "JPM": "JPM_USDT", "WMT": "WMT_USDT",
+    "IBM": "IBM_USDT", "ORCL": "ORCL_USDT",
+    "BRK-B": "BRKB_USDT", "V": "V_USDT", "UNH": "UNH_USDT",
+    "XOM": "XOM_USDT", "JNJ": "JNJ_USDT", "PG": "PG_USDT",
+    "HD": "HD_USDT", "COST": "COST_USDT",
     "MA": "MAX_USDT",           # 无永续；现货 Mastercard xStock
     ".INX": "SPX500_USDT",      # 勿用 SPX_USDT
     ".DJI": "US30_USDT",
     ".NDX": "NAS100_USDT",
+    "SPY": "SPY_USDT", "QQQ": "QQQ_USDT", "IWM": "IWM_USDT",
     "6758.T": "SONY_USDT",      # 日股代币代理
     "005930": "SAMSUNG_USDT",   # 韩股代币代理
     "000660": "SKHYNIX_USDT",
@@ -112,23 +130,17 @@ GATE_SPOT_FALLBACK: dict[str, str] = {
 
 GATE_SPOT_EQUITY = frozenset(GATE_SPOT_FALLBACK.values()) | frozenset({"MAX_USDT", "XAUT_USDT"})
 
-# 覆盖池可解析、但不进默认宇宙（VPS：COIN/BABA/…/ORCL + ETF）。
+# 覆盖池可解析、但不进默认宇宙。SQQQ 为可选反向 ETF；TM 是丰田 ADR 代币（≠ 7203.T）。
 GATE_EXTRA_EQUITY: dict[str, tuple[str, str, str]] = {
-    "SPY": ("SPY_USDT", "SPY", "us_stock"),
-    "QQQ": ("QQQ_USDT", "QQQ", "us_stock"),
-    "IWM": ("IWM_USDT", "IWM", "us_stock"),
-    "SQQQ": ("SQQQ_USDT", "SQQQ", "us_stock"),
-    "COIN": ("COIN_USDT", "COIN", "us_stock"),
-    "BABA": ("BABA_USDT", "BABA", "us_stock"),
-    "AMD": ("AMD_USDT", "AMD", "us_stock"),
-    "ARM": ("ARM_USDT", "ARM", "us_stock"),
-    "PLTR": ("PLTR_USDT", "PLTR", "us_stock"),
-    "HOOD": ("HOOD_USDT", "HOOD", "us_stock"),
-    "MSTR": ("MSTR_USDT", "MSTR", "us_stock"),
-    "IBM": ("IBM_USDT", "IBM", "us_stock"),
-    "ORCL": ("ORCL_USDT", "ORCL", "us_stock"),
+    "SQQQ": ("SQQQ_USDT", "SQQQ", "us_index"),
     "TM": ("TM_USDT", "丰田ADR", "us_stock"),
 }
+
+US_INDEX_TOKEN_CODES = frozenset(
+    {x["symbol"] for x in US_INDICES}
+    | {x["symbol"] for x in US_ETF_DEFAULT}
+    | {"SQQQ"}
+)
 
 # 猜 {TICKER}_USDT 时跳过：与加密货币撞名，或明显不是股票代币。
 GATE_GUESS_BLOCKLIST = frozenset({"DIA", "MA"})  # DIA_USDT=crypto DIA；MA_USDT=Mind AI
@@ -189,6 +201,42 @@ def gate_spot_fallback_for(code: str) -> str | None:
     if not code:
         return None
     return GATE_SPOT_FALLBACK.get(code)
+
+
+def mapped_asset_class(code: str) -> str:
+    """映射表代码的资产类别：美指/ETF → us_index；日韩代币代理 → jp/kr_stock；其余美股。"""
+    if not code:
+        return "us_stock"
+    extra = GATE_EXTRA_EQUITY.get(code)
+    if extra:
+        return extra[2]
+    if code in US_INDEX_TOKEN_CODES:
+        return "us_index"
+    if str(code).endswith(".T"):
+        return "jp_stock"
+    if str(code)[:1].isdigit():
+        return "kr_stock"
+    return "us_stock"
+
+
+def catalog_display_name(code: str) -> str:
+    """默认池 / 已知目录里的展示名。"""
+    for idx in US_INDICES:
+        if idx["symbol"] == code:
+            return idx["name"]
+    for etf in US_ETF_DEFAULT:
+        if etf["symbol"] == code:
+            return etf["name"]
+    for stk in JP_STOCKS_KNOWN:
+        if stk["symbol"] == code:
+            return stk["name"]
+    for stk in KR_STOCKS_KNOWN:
+        if stk["symbol"] == code:
+            return stk["name"]
+    extra = GATE_EXTRA_EQUITY.get(code)
+    if extra:
+        return extra[1]
+    return code
 
 
 def gate_contract_for(code: str) -> str | None:
@@ -321,6 +369,10 @@ def yahoo_symbol_set() -> set[str]:
     if _yahoo_symbol_set is None:
         _yahoo_symbol_set = set(US_STOCKS)
         _yahoo_symbol_set.update(x["symbol"] for x in US_INDICES)
+        _yahoo_symbol_set.update(x["symbol"] for x in US_ETF_DEFAULT)
+        for code in GATE_EQUITY_MAP:
+            if mapped_asset_class(code) == "us_stock":
+                _yahoo_symbol_set.add(code)
         _yahoo_symbol_set.update(GOLD_YAHOO_SYMBOLS)
         _yahoo_symbol_set.update(("^GSPC", "^DJI", "^IXIC", "^NDX"))
     return _yahoo_symbol_set
@@ -387,19 +439,22 @@ def _lookup_static(code: str) -> dict | None:
             return _with_gate(_ident(code, idx["name"], "us_index", "sina",
                           sina_symbol=idx.get("sina_symbol") or code,
                           znb=idx.get("znb"), known=True))
+    for etf in US_ETF_DEFAULT:
+        if etf["symbol"] == code:
+            return _with_gate(_ident(code, etf["name"], "us_index", "gate", known=True))
     for idx in JP_INDICES:
         if idx["symbol"] == code:
             return _with_gate(_ident(code, idx["name"], "jp_index", "sina",
                           sina_gi=idx.get("sina_gi") or "NKY", known=True))
-    for idx in KR_INDICES:
+    for idx in KR_INDICES_KNOWN:
         if idx["symbol"] == code:
             return _with_gate(_ident(code, idx["name"], "kr_index", "naver",
                           naver_code=idx.get("naver_code") or code, known=True))
-    for stk in JP_STOCKS:
+    for stk in JP_STOCKS_KNOWN:
         if stk["symbol"].upper() == code.upper():
             return _with_gate(_ident(stk["symbol"], stk["name"], "jp_stock", "naver",
                           naver_code=stk["symbol"], known=True))
-    for stk in KR_STOCKS:
+    for stk in KR_STOCKS_KNOWN:
         if stk["symbol"] == code:
             return _with_gate(_ident(code, stk["name"], "kr_stock", "naver", known=True))
     if code in US_STOCKS:
@@ -408,6 +463,16 @@ def _lookup_static(code: str) -> dict | None:
     if extra:
         contract, name, cls = extra
         return _with_gate(_ident(code, name, cls, "gate", known=True, gate_contract=contract))
+    if code in GATE_EQUITY_MAP:
+        cls = mapped_asset_class(code)
+        kwargs = {"known": True}
+        if cls == "jp_stock":
+            kwargs["naver_code"] = code
+        elif cls == "kr_stock":
+            kwargs["naver_code"] = code
+        elif cls == "us_index":
+            kwargs["sina_symbol"] = code
+        return _with_gate(_ident(code, catalog_display_name(code), cls, "gate", **kwargs))
     if code in GOLD_CRYPTO_SYMBOLS:
         return _ident(code, GOLD_DISPLAY_NAME, "gold", "crypto", known=True)
     return None
@@ -788,7 +853,7 @@ def build_global_pool(crypto_tickers: list[dict], top_n: int = CRYPTO_TOP_N,
     组装全市场标的 Tab 扫描池。
 
     override_symbols 非空：只使用这些标的。
-    否则：涨幅 TOP N 永续 + 黄金 + 美/日/韩指数 + US_STOCKS + 日韩龙头。
+    否则：涨幅 TOP N 永续 + 黄金 XAUT + 美股20/美指ETF（Gate 永续）+ 索尼/三星代理 + 日经/KOSPI 日K。
     黄金候选不占用 TOP N 名额。
     """
     if override_symbols:
@@ -831,12 +896,14 @@ def build_global_pool(crypto_tickers: list[dict], top_n: int = CRYPTO_TOP_N,
         g.setdefault("source", g.get("source") or "crypto")
         add(g)
 
-    for idx in US_INDICES:
+    for idx in US_INDEX_DEFAULT:
         it = _pool_item(idx["symbol"], idx["name"], "us_index", "sina")
         it["sina_symbol"] = idx.get("sina_symbol") or idx["symbol"]
         if idx.get("znb"):
             it["znb"] = idx["znb"]
         add(it)
+    for etf in US_ETF_DEFAULT:
+        add(_pool_item(etf["symbol"], etf["name"], "us_index", "gate"))
 
     for stk in US_STOCKS:
         add(_pool_item(stk, stk, "us_stock", "sina"))
@@ -861,7 +928,7 @@ def static_global_counts() -> dict:
     """文档/测试用：静态侧数量（不含动态 TOP 币）。"""
     return {
         "gold": 1,
-        "us_index": len(US_INDICES),
+        "us_index": len(US_INDEX_DEFAULT) + len(US_ETF_DEFAULT),
         "us_stock": len(US_STOCKS),
         "jp_index": len(JP_INDICES),
         "jp_stock": len(JP_STOCKS),

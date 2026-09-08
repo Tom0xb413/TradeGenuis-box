@@ -16,7 +16,7 @@
   股东户数 ：datacenter-web.eastmoney.com  备用 AKShare
   热点概念 ：push2.eastmoney.com clist + emweb F10  备用 AKShare（新浪概念 / 同花顺）
   全市场名单：东财 clist  备用新浪 sh_a+sz_a（不用 hs_a）  再备用 AKShare 官方名单
-  全市场标的 Tab ：USDT 永续 TOP20 + 黄金 + 美/日/韩指数与龙头（见 global_pool.py）
+  全市场标的 Tab ：USDT 永续 TOP20 + 黄金 XAUT + 美股20/美指ETF（Gate 永续）+ 索尼/三星代理 + 日经/KOSPI 日K（见 global_pool.py）
              Binance USDT 永续失败后粘性回退 Gate.io；有 Gate 股票代币则走代币 K 线（非官方正股）；
              无代币美股走新浪 getMinK / 日K，日韩正股走 Naver/Sina 日K
              K 线周期 crypto_interval：4h | 8h | 1d（默认 1d）
@@ -2296,7 +2296,7 @@ def main() -> int:
     ap.add_argument("--market", action="store_true",
                     help="全市场扫描：沪深全部 A 股逐一深度计算（无粗筛）")
     ap.add_argument("--crypto", action="store_true",
-                    help="全市场标的扫描：USDT 永续 24h 涨幅前 N + 黄金 + 美/日/韩指数与龙头，箱体逻辑复用")
+                    help="全市场标的扫描：USDT 永续 24h 涨幅前 N + 黄金 XAUT + 美股20/美指ETF（Gate 永续）+ 索尼/三星代理 + 日经/KOSPI 日K，箱体逻辑复用")
     ap.add_argument("--quick", action="store_true",
                     help="快扫模式：量比粗筛 TOP N 后深度计算（仅配合 --market）")
     ap.add_argument("--top", type=int, default=MARKET_TOP,

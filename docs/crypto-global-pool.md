@@ -12,25 +12,28 @@
 
 1. **USDT 永续干净名**（`AAPL_USDT`、`SPX500_USDT`、`SONY_USDT`）
 2. 失败再试现货 `*X` / `*G` / `*ON`（如 `AAPLX_USDT`）。**不用** `3L`/`3S`
-3. 仍无：美股/美指新浪 `getMinK`；日韩正股日K
+3. 仍无：美股/美指新浪 `getMinK`；日韩正股 / 日经 / KOSPI 日K
 
 日韩 Gate 标的（索尼、三星）看板标 **代币代理**；美股/美指标 **股票代币**。
 
 | 内部代码 | 主路径（永续） | 现货回退 | 说明 |
 |---|---|---|---|
-| US20 除 MA | `{TICKER}_USDT`，伯克希尔 `BRKB_USDT` | 有核对过的 `*X`/`*G` | `WMTX` 不是沃尔玛 |
+| 默认美股 20 | `{TICKER}_USDT` | 有核对过的 `*X`/`*G` | AAPL/MSFT/NVDA/GOOGL/AMZN/META/TSLA/COIN/BABA/NFLX/AMD/AVGO/ARM/PLTR/HOOD/MSTR/JPM/WMT/IBM/ORCL。`WMTX` 不是沃尔玛 |
+| 覆盖可解析 | `BRKB_USDT` / `V_USDT` / `UNH_USDT` 等 | 部分 `*X` | 不进默认宇宙 |
 | `MA` | （无） | `MAX_USDT` | 永续无 MA；现货 `MA_USDT` 是 Mind AI |
-| `.INX` | `SPX500_USDT` | — | **不要** `SPX_USDT`（梗币） |
-| `.DJI` | `US30_USDT` | — | **不要** `DIA_USDT`（加密 DIA） |
-| `.NDX` | `NAS100_USDT` | — | |
+| `.INX` | **`SPX500_USDT`** | — | **不要** `SPX_USDT`（梗币） |
+| `SPY`/`QQQ`/`IWM` | 对应 `_USDT` 永续 | `SPYX`/`QQQX` | 默认美指/ETF |
+| `SQQQ` | `SQQQ_USDT` | — | 可选，仅覆盖池 |
+| `.DJI` | `US30_USDT` | — | 覆盖可解析。**不要** `DIA_USDT`（加密 DIA） |
+| `.NDX` | `NAS100_USDT` | — | 覆盖可解析 |
 | `.IXIC` | （无） | | 新浪分钟K |
-| `SPY`/`QQQ`/`IWM`/`SQQQ` | 对应 `_USDT` 永续 | `SPYX`/`QQQX` | 覆盖池 ETF |
-| `7203.T` | （无） | | 日元丰田日K。无 TOYOTA 代币 |
-| `6758.T` | `SONY_USDT` | | **代币代理** |
-| `005930`/`000660` | `SAMSUNG_USDT` / `SKHYNIX_USDT` | | **代币代理** |
-| `NKY`/KOSPI/KOSDAQ | （无） | | 日K。勿用 `JPN225_USDT` |
+| `7203.T` | （无） | | 日元丰田日K。无 TOYOTA 代币；`TM_USDT` 是美元 ADR |
+| `6758.T` | `SONY_USDT` | | **代币代理**（默认日股） |
+| `005930` | `SAMSUNG_USDT` | | **代币代理**（默认韩股） |
+| `000660` | `SKHYNIX_USDT` | | 覆盖可解析 |
+| `NKY`/KOSPI/KOSDAQ | （无） | | 日K 次源。勿用 `JPN225_USDT` |
 
-覆盖池额外永续：`COIN` `BABA` `AMD` `ARM` `PLTR` `HOOD` `MSTR` `IBM` `ORCL` `TM`。`AAPL` 与 `AAPL_USDT` 都解析到 Gate。
+覆盖校验：`AAPL` 与 `AAPL_USDT` 都解析到 Gate `AAPL_USDT`。`SPX500` / `SPX500_USDT` → `.INX`。
 
 无对应代币时：
 
@@ -43,16 +46,16 @@
 |---|---|---|---|
 | USDT 永续涨幅榜 | `crypto` | `CRYPTO_TOP_N = 20` | Binance `fapi` 24h ticker，失败后**粘性** Gate.io；股票代币 / xStock / 杠杆合约不占 TOP20 |
 | 黄金（1 只） | `gold` | 1 | Gate **`XAUT_USDT` 现货**（及永续；不要用 `XAU_USDT` 当首选）→ `XAUUSDT` / `PAXGUSDT` |
-| 美股指数 | `us_index` | 4 | Gate 代币（标普/道指/纳指100）或新浪分钟K/日K（纳指综合） |
-| 美股大盘 | `us_stock` | `US_STOCKS` 约 20 | 永续干净名；失败再现货 *X；再无则新浪 getMinK |
-| 日经 225 | `jp_index` | 1 | 新浪 `gi.finance.sina.com.cn/hq/daily?symbol=NKY` |
-| 日股龙头 | `jp_stock` | 2 | 索尼走 Gate `SONY_USDT`；丰田 `7203.T` 走 Naver 日K |
-| KOSPI / KOSDAQ | `kr_index` | 2 | Naver `siseJson.nhn` |
-| 韩股龙头 | `kr_stock` | 2 | Gate `SAMSUNG_USDT` / `SKHYNIX_USDT`，失败再 Naver |
+| 美指/ETF | `us_index` | 4 | Gate：`.INX`→`SPX500_USDT`，`SPY`/`QQQ`/`IWM` 永续 |
+| 美股 | `us_stock` | 20 | Gate 永续干净名；失败再现货 *X；再无则新浪 getMinK |
+| 日经 225 | `jp_index` | 1 | 新浪 `gi.finance.sina.com.cn/hq/daily?symbol=NKY`（无 NIKKEI 代币） |
+| 日股 | `jp_stock` | 1 | 索尼 Gate `SONY_USDT` 代币代理 |
+| KOSPI | `kr_index` | 1 | Naver 日K（无 KOSPI 代币） |
+| 韩股 | `kr_stock` | 1 | Gate `SAMSUNG_USDT` 代币代理 |
 
-合计约 **20 + 1 + 4 + 20 + 1 + 2 + 2 + 2**。黄金永续若出现在涨幅榜里，**不占用** TOP20 名额。
+合计约 **20 + 1 + 4 + 20 + 1 + 1 + 1 + 1**。黄金永续若出现在涨幅榜里，**不占用** TOP20 名额。
 
-看板 `market` 仍为 `crypto`。卡片徽章区分 币 / 金 / 美指(代币) / 美股(代币) / 日股(代币) / 韩股(代币)。
+看板 `market` 仍为 `crypto`。卡片徽章区分 币 / 金 / 美指(代币) / 美股(代币) / 日股(代理) / 韩股(代理)。
 
 ## 明确不用的源
 
@@ -90,7 +93,7 @@
 - 持久化：`data/global_override_pool.json`（`{"symbols":[...]}`）
 - **非空**：扫描**只扫这些标的**（仍应用周期与形态）
 - **空**：默认混合池
-- 校验：`AAPL` / `AAPL_USDT` / `AAPLX` / `PLTR` / `SAMSUNG` → Gate 市场 / 黄金 / Sina / Naver
+- 校验：`AAPL` / `AAPL_USDT` / `AAPLX` / `PLTR` / `SPX500` / `SAMSUNG` → Gate 市场 / 黄金 / Sina / Naver
 - 无效代码不写入；接口返回 `rejected: [{code, reason}]`
 - 药丸显示：覆盖时「N 只」，否则「默认」
 
