@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from urllib.parse import quote
+import time
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -285,28 +286,29 @@ def yahoo_fetch_plan(interval: str) -> dict:
 
 def _yahoo_chart_json(symbol: str, y_interval: str, y_range: str) -> dict | None:
     enc = quote(symbol, safe="")
-    last_err = None
     for host in YAHOO_CHART_HOSTS:
         url = (
             f"{host}/v8/finance/chart/{enc}"
             f"?interval={y_interval}&range={y_range}&includePrePost=false"
         )
-        try:
-            r = _YAHOO_HTTP.get(url, timeout=YAHOO_TIMEOUT)
-            if r.status_code != 200:
-                last_err = f"HTTP {r.status_code}"
-                continue
-            data = r.json()
-            node = (data.get("chart") or {})
-            if node.get("error"):
-                last_err = str(node.get("error"))[:80]
-                continue
-            result = node.get("result") or []
-            if result:
-                return result[0]
-        except Exception as e:
-            last_err = str(e)[:80]
-            continue
+        for attempt in range(3):
+            try:
+                r = _YAHOO_HTTP.get(url, timeout=YAHOO_TIMEOUT)
+                if r.status_code == 429:
+                    time.sleep(0.8 * (attempt + 1))
+                    continue
+                if r.status_code != 200:
+                    break
+                data = r.json()
+                node = (data.get("chart") or {})
+                if node.get("error"):
+                    break
+                result = node.get("result") or []
+                if result:
+                    return result[0]
+                break
+            except Exception:
+                break
     return None
 
 

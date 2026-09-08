@@ -354,6 +354,38 @@ class ConfigIntervalHttpTest(unittest.TestCase):
         self.assertEqual(junk["config"]["crypto_interval"], "1d")
 
 
+class YahooRetryTest(unittest.TestCase):
+    def test_429_then_200(self):
+        calls = {"n": 0}
+        result = {
+            "timestamp": [1_700_000_000],
+            "indicators": {"quote": [{
+                "open": [10], "high": [11], "low": [9], "close": [10.5], "volume": [100],
+            }]},
+            "meta": {"shortName": "Apple Inc.", "regularMarketPrice": 10.5, "previousClose": 10},
+        }
+
+        class FakeResp:
+            def __init__(self, code, payload=None):
+                self.status_code = code
+                self._payload = payload or {}
+
+            def json(self):
+                return self._payload
+
+        def fake_get(url, timeout=10):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return FakeResp(429)
+            return FakeResp(200, {"chart": {"result": [result]}})
+
+        with patch.object(gp._YAHOO_HTTP, "get", side_effect=fake_get), \
+             patch.object(gp.time, "sleep"):
+            node = gp._yahoo_chart_json("AAPL", "1d", "5d")
+        self.assertIsNotNone(node)
+        self.assertEqual(calls["n"], 2)
+
+
 class FormatBarDateTest(unittest.TestCase):
     def test_daily_vs_intraday(self):
         ts = datetime(2024, 3, 1, 16, 0).timestamp()

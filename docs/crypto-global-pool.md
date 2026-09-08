@@ -24,6 +24,8 @@
 1. **Binance / Gate 黄金永续**（与现有币圈后端相同，含粘性 Gate）：`XAUUSDT` → `PAXGUSDT`
 2. **Yahoo**：`GC=F`（COMEX 黄金期货）→ `GLD`（SPDR 黄金 ETF）
 
+本仓库验证环境（Binance 官方超时后粘性 Gate）：**最终选用 `XAUUSDT`（Gate USDT 永续）**，24h 成交额充足，展示名「黄金」。`PAXGUSDT` 同样存在但流动性更低，仅作次选。Yahoo `GC=F`/`GLD` 在部分 IP 上会 HTTP 429，代码会短暂重试后跳过。
+
 展示名固定为「黄金」。扫描结果 `crypto.json` 的 `gold` 字段记录实际 `code` 与 `source`（`crypto` 或 `yahoo`）。国内 VPS 上若币所与 Yahoo 都超时，该行被跳过并计入 `skipped`。
 
 ## K 线周期 `crypto_interval`
