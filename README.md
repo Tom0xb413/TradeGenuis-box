@@ -6,8 +6,8 @@
 
 ## 产品特性
 
-- **A股全市场扫描**：沪深 5000+ 只逐一深度计算，无粗筛（`--market`），也可量比粗筛快扫（`--quick`）
-- **全市场标的扫描**：USDT 永续涨幅前 **20** + 黄金（Gate `XAUT_USDT` 现货/永续）+ 美股 20 / `SPX500`/`SPY`/`QQQ`/`IWM`（Gate 永续干净名）+ 索尼/三星代币代理 + 日经/KOSPI 日K 次源。**代币化加密市场，不是纽交所/东证/韩交所官方打印**；现货 `*X`/`*G`/`*ON` 仅回退，不用 `3L`/`3S`。覆盖池可点顶栏「覆盖」编辑（`AAPL` 与 `AAPL_USDT` 均解析到 Gate）。详见 [docs/crypto-global-pool.md](docs/crypto-global-pool.md)
+- **A股全市场扫描**：沪深 5000+ 只逐一深度计算，无粗筛（`--market`），也可量比粗筛快扫（`--quick`）。**不**写入 180 根滚动 K 线库；看板 A 股 Tab 只读上次 `watchlist.json`，扫描入口在「标的/数据」
+- **全市场标的**：**本地滚动 K 线库**（每票每周期最多 180 根）+ 后台每 4 小时增量同步并分析。看板只读 `crypto.json`，主页不再「全市场标的扫描」。池与数据源在顶栏「标的/数据」配置。宇宙仍为 USDT 永续涨幅前 **20** + 黄金 XAUT + 美股 20 / `SPX500`/`SPY`/`QQQ`/`IWM`（Gate 永续干净名）+ 索尼/三星代币代理 + 日经/KOSPI 日K。详见 [docs/kline-store.md](docs/kline-store.md) 与 [docs/crypto-global-pool.md](docs/crypto-global-pool.md)
 - **四条件机械打分**（A股各 25 分，≥85 达标）：
   1. 热点题材 —— 当日涨幅前 3 概念板块 + 用户自定义关注板块
   2. 倍量启动 ≥3 日 —— 量 ≥ 前 5 日均量 1.8 倍连续计数
@@ -17,29 +17,29 @@
   - **经典**（默认）：60 日窗口最高/最低 + 原试盘规则，行为与历史版本一致
   - **P0增强**：分位数边界（High 95% / Low 5%）+ 振幅门控 15% + 更严上影/量能试盘
   - **P1通道**：斜向通道（OLS 中轴 + 残差 95%/5% 分位带 + 温和斜率/R²/ADX）；K 线画斜轨
-  - 切换后 K 线箱体立即按新模式绘制；评分需「强制重扫」。参数与字段见 [docs/box-modes.md](docs/box-modes.md)
+  - 切换后 K 线箱体立即按新模式绘制；评分请在「标的/数据」中立即分析。参数与字段见 [docs/box-modes.md](docs/box-modes.md)
   - **试盘 vs 真突破**（元数据，不改四条件满分）：相对当前模式上沿 R 标注 `edge_event`（`test` / `breakout_candidate` / `breakout_confirmed` / `breakout_failed`）。确认突破为 t+2 事后标签
 - **形态族**（横幅「形态」，写入 `pattern_family`，默认 `box` 不打断现有用户）：
   - **箱体/通道**（`box`）：上述箱体模式与四条件评分
   - **高位旗形(杯柄)**（`high_flag`）：放量 pole → 高位浅回撤缩量旗面 → 可选二次买点。批量筛选「仅旗形 / 仅二次买点」，不改四条件 100 分。参数见 [docs/pattern-high-flag.md](docs/pattern-high-flag.md)
   - **趋势线**（`trendline`）：摆动高低点连成上升支撑 / 下降压力 L(t)；收盘越过即结构改变。筛选「全部有线 / 刚跌破支撑 / 刚突破压力」。参数见 [docs/pattern-trendline.md](docs/pattern-trendline.md)
-  - 切换形态后须强制重扫；扫描缓存身份含 `pattern_family`，避免串用 1 小时结果
+  - 切换形态后请在「标的/数据」中立即分析；扫描缓存身份含 `pattern_family`
 - **结果优先的图形化看板**：只展示达标标的，每张卡片内嵌 K 线（含成交量、箱体虚线、悬浮十字提示）、四条件状态、评分徽章
-- **自动扫描调度**：每个交易日 11:30（午间收盘）/ 15:00（收盘）各扫一次，服务端常驻调度
-- **共享扫描进度**：全市场 / 快扫 / 全市场标的 / 自选池扫描把结构化进度写入服务端 `scan_progress`；所有打开中的看板每秒轮询 `GET /api/status`，顶部显示同一条进度条与百分比。进页时若服务器已在扫，无需点击也会自动出现进度条；扫描进行中再点扫描会 **加入当前任务**（`status: running`），不会开第二轮
+- **自动扫描调度**：每个交易日 11:30 / 15:00 自动扫 **A 股**（`config.auto`）。全市场标的由 `kline_sync_hours`（默认 4 小时）后台增量拉 K 线并分析
+- **共享进度**：配置里触发的同步/分析/A 股扫描把进度写入 `scan_progress`；打开中的看板轮询 `GET /api/status`
 - **扫描并发**：默认 **16** 线程（`scan_workers`，钳制 4–32），自选池也已并行。上游限流报错增多时可把并发降到 8 或 4（见下）
 - **实时行情刷新**：达标标的每 3 秒静默刷新价格/涨跌
 - **K 线懒加载**：卡片进入视口附近才请求 `/api/kline` 并绘制（IntersectionObserver），同时最多 4 路并发，避免进页时按卡片数打满上游；全市场标的仍列出全部进池标的，优先加载视口内卡片，达标卡在队列中优先
 - **日 K 服务端缓存**：日线内存 TTL 约 45 分钟，并落盘 `data/kline_cache/`（按市场+代码+日期）；空数据与错误响应不缓存。与「扫描结果 1 小时缓存」相互独立
 - **Telegram 推送**（可选）：扫描结果推送至群/私聊
-- **零数据库、零 API Key**：全部依赖公开接口（腾讯/新浪/东方财富/Binance/Gate.io，东财失败时 AKShare 降级），结果即 JSON 文件
+- **本地 SQLite K 线库**（全市场标的）：`data/kline_store.sqlite`，无需 API Key；A 股仍用公开接口即时扫描、结果 JSON
 - **本 fork 增强**（相对上游）：
   - 新浪全市场名单改为 `sh_a` + `sz_a` 分市场拉取（不用 `hs_a`），收盘后价格回退结算价——国内 VPS 上验证过
   - 全市场标的：Binance 主源，失败后**粘性**回退 Gate.io USDT 永续；黄金优先 `XAUT_USDT`；美股/美指默认走 Gate 股票代币永续干净名（`AAPL_USDT` / `SPX500_USDT`，**非官方正股打印**），现货 *X 回退；日韩默认索尼/三星代币代理，日经/KOSPI 走 Naver/Sina 日K（勿依赖 Yahoo）
   - 东财 push2 全挂时经 AKShare 走新浪概念/交易所官方名单/资金流等非 push2 接口，扫描尽量完成而非中止
-  - 看板「全市场扫描 / 全市场标的扫描」默认使用 **1 小时结果缓存**；「强制重扫」或交易日 11:30/15:00 调度会绕过缓存
+  - 看板「标的/数据」维护池与源；全市场标的打开即读上次分析结果，K 线优先本地 SQLite（`data/kline_store.sqlite`，每票 180 根）
   - 扫描默认 16 线程（`scan_workers` / `SCAN_WORKERS`，钳制 4–32）；多浏览器共享同一条 `scan_progress` 进度条
-  - 看板 K 线视口懒加载 + 4 路并发；日 K 45 分钟内存/磁盘缓存（`data/kline_cache/`）
+  - 看板 K 线视口懒加载 + 4 路并发；A 股日 K 45 分钟内存/磁盘缓存（`data/kline_cache/`）；全市场标的以本地库为准
 
 ## 快速启动
 
@@ -48,9 +48,9 @@ git clone <repo-url> && cd <repo>
 bash start.sh
 ```
 
-启动后打开 **http://127.0.0.1:8808**。`start.sh` 会自动装依赖（`requests`、`akshare`）、首次无数据时后台启动一次全市场扫描。
+启动后打开 **http://127.0.0.1:8808**。`start.sh` 会自动装依赖。全市场标的在服务启动约 25 秒后后台同步 K 线；A 股不会自动全扫。
 
-页面加载即展示 `data/watchlist.json` / `data/crypto.json` 缓存（若有）。一小时内再点「全市场扫描」会直接返回缓存；需要最新结果时点「强制重扫」。
+页面加载即展示 `data/watchlist.json` / `data/crypto.json`。主页没有全量扫描按钮；池、数据源、立即同步/分析在「标的/数据」。
 
 手动启动（分步）：
 
@@ -69,7 +69,7 @@ python3 scanner.py --crypto     # 全市场标的：永续涨幅前 20 + 黄金 
 python3 scanner.py              # 自选池（data/pool.json）
 ```
 
-看板顶部横幅可一键切换 **A股 / 全市场标的** 两个 tab；扫描按钮随 tab 自动切换目标市场。全市场标的 Tab 为全球混合池（币 TOP20 + 黄金 XAUT + 美股20/美指ETF Gate 永续 + 索尼/三星代理 + 日经/KOSPI 日K）。币走 Binance，超时粘性 Gate；股票有 Gate 代币则用代币 K 线（4h/8h/1d），无代币美股用新浪分钟K，日韩正股用日K。顶栏「覆盖」可配置覆盖池。周期胶囊 **4h / 8h / 1日** 写入 `crypto_interval`。
+看板顶部横幅可一键切换 **A股 / 全市场标的**。全市场标的 Tab 为全球混合池，K 线由本地库 + 4h 后台任务维护。顶栏「标的/数据」配置覆盖池与每票数据源。周期胶囊 **4h / 8h / 1日** 写入 `crypto_interval`。A 股全扫仅在该配置面板。
 
 ### 扫描并发 `scan_workers`
 
@@ -108,7 +108,7 @@ python3 scanner.py --push        # 扫描并推送
 
 | 文件 | 说明 |
 |---|---|
-| `start.sh` | 一键启动脚本（装依赖 + 首次扫描 + 起服务） |
+| `start.sh` | 一键启动脚本（装依赖 + 起服务；K 线由 server 后台维护） |
 | `scanner.py` | 扫描引擎：拉数据 → 四条件打分 → 写 JSON / 推 Telegram |
 | `box_engine.py` | 箱体识别：`classic` / `p0` / `p1` 斜向通道 |
 | `pattern_flag.py` | 高位旗形 / 杯柄（柄）：pole + 缩量旗面 + 二次买点 |
@@ -119,12 +119,16 @@ python3 scanner.py --push        # 扫描并推送
 | `docs/pattern-high-flag.md` | 高位旗形参数与 Bull Flag / 杯柄 / 突破中继 |
 | `docs/pattern-trendline.md` | 趋势线参数与 Tom 图例（价格×时间边界） |
 | `global_pool.py` | 全球池常量、Gate 股票代币映射、覆盖池 |
+| `kline_store.py` | SQLite 滚动 K 线库（180 根 / 标的 / 周期） |
+| `sync_worker.py` | 增量同步 + 本地分析作业 |
+| `docs/kline-store.md` | 库表、4h 作业、数据源、A 股不入库 |
 | `equity_sources.py` | 无代币时的美股分钟K/日K、日韩日K（Sina / Naver） |
 | `docs/crypto-global-pool.md` | 全球池宇宙、Gate 代币、覆盖池、周期规则 |
 | `data/pool.json` | 自选池（`code` 必填） |
 | `data/sectors.json` | 用户自定义关注板块 |
 | `data/*.json` | 扫描结果与缓存（自动生成，已在 .gitignore） |
-| `data/kline_cache/` | 日 K 磁盘缓存（按市场+代码+日期，自动生成） |
+| `data/kline_cache/` | A 股日 K 磁盘缓存（按市场+代码+日期，自动生成） |
+| `data/kline_store.sqlite` | 全市场标的滚动 K 线（自动生成） |
 | `static/fonts/` | 自托管字体（Outfit / IBM Plex Mono） |
 
 ## 说明与风险

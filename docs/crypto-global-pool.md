@@ -88,22 +88,23 @@
 
 ## 覆盖池
 
-顶栏 **「覆盖」** 可点开编辑器：textarea 填符号（逗号或换行），保存前逐只 `validate_symbol`。
+顶栏 **「标的/数据」** 维护池、每票数据源与拉取状态（见 [kline-store.md](kline-store.md)）。名单仍可落在 `data/global_override_pool.json`。
 
-- 持久化：`data/global_override_pool.json`（`{"symbols":[...]}`）
-- **非空**：扫描**只扫这些标的**（仍应用周期与形态）
+- **非空**：后台**只维护这些标的**
 - **空**：默认混合池
-- 校验：`AAPL` / `AAPL_USDT` / `AAPLX` / `PLTR` / `SPX500` / `SAMSUNG` → Gate 市场 / 黄金 / Sina / Naver
-- 无效代码不写入；接口返回 `rejected: [{code, reason}]`
-- 药丸显示：覆盖时「N 只」，否则「默认」
+- 校验：`AAPL` / `AAPL_USDT` / `AAPLX` / `PLTR` / `SPX500` / `SAMSUNG` → Gate / 黄金 / Sina / Naver
+- 无效代码不写入；`rejected: [{code, reason}]`
 
 ```
 POST /api/global_pool/validate  {symbols:[]} → {ok:[], bad:[{code,reason}]}
 GET  /api/global_pool/override
 POST /api/global_pool/override  {symbols:[]} | {action:"clear"}
+GET  /api/kline_store/status
+GET/POST /api/kline_store/pool
+POST /api/kline_store/sync | /api/kline_store/analyze
 ```
 
-扫描 1 小时缓存身份含 `override_fingerprint`，改覆盖池后不会误用旧结果。
+扫描/分析缓存身份含 `override_fingerprint`，改池后请在配置里立即分析。
 
 ## 缓存身份
 
@@ -122,4 +123,4 @@ POST /api/global_pool/override  {symbols:[]} | {action:"clear"}
 - 周期胶囊 **4h / 8h / 1日**
 - 池筛选：全部 / 仅币 / 仅美股 / 日股 / 韩股 / 黄金+指数
 - 有代币时徽章带「代币」，副标题展示 Gate 合约名
-- 「覆盖」编辑覆盖池
+- 「标的/数据」配置池、源、同步状态；主页无全量扫描按钮

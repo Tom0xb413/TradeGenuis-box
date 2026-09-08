@@ -345,7 +345,7 @@ class DashboardFamilyContractTest(unittest.TestCase):
         self.assertIn("pattern_family", self.html)
 
     def test_rescan_hint_on_family_mismatch(self):
-        self.assertIn("请强制重扫以更新", self.html)
+        self.assertIn("请在「标的/数据」中立即分析以更新", self.html)
         self.assertIn("scanFam", self.html)
 
 

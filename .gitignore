@@ -11,6 +11,10 @@ data/mkt_cache.json
 data/config.json
 data/global_override_pool.json
 data/kline_cache/
+data/kline_store.sqlite
+data/kline_store.sqlite-wal
+data/kline_store.sqlite-shm
+data/maintained_pool.json
 
 # 本地环境
 .venv/

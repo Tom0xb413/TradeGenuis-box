@@ -391,7 +391,7 @@ class DashboardTrendlineContractTest(unittest.TestCase):
         self.assertIn("突破压力", self.html)
 
     def test_rescan_hint_and_hide_box_mode(self):
-        self.assertIn("请强制重扫以更新", self.html)
+        self.assertIn("请在「标的/数据」中立即分析以更新", self.html)
         self.assertIn('fam !== "box"', self.html)
 
 
