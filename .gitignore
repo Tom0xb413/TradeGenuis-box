@@ -9,7 +9,7 @@ data/crypto.json
 data/universe.json
 data/mkt_cache.json
 data/config.json
-data/sectors.json
+data/global_override_pool.json
 data/kline_cache/
 
 # 本地环境

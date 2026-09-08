@@ -118,6 +118,11 @@
     .asset-badge.gold { color: #E8C48A; background: rgba(232,196,138,.16); }
     .asset-badge.us_index { color: #9BB7E8; background: rgba(155,183,232,.16); }
     .asset-badge.us_stock { color: var(--ink-dim); background: rgba(229,212,182,.10); }
+    .asset-badge.tokenized { letter-spacing: 0; }
+    .token-note { font-size: 10.5px; color: var(--ink-faint); margin-left: 6px; }
+    .pill-edit { cursor: pointer; }
+    .pill-edit:hover { border-color: var(--mint); color: var(--ink); }
+    .interval-note { font-size: 10.5px; color: var(--ink-faint); margin-left: 6px; }
     .act { border: none; border-radius: 999px; font-size: 13px; font-weight: 600; letter-spacing: .08em; padding: 8px 20px; cursor: pointer; transition: filter .2s, transform .1s; color: var(--ink); }
     .act:active { transform: translateY(1px); }
     .act:disabled { opacity: .5; cursor: not-allowed; }
@@ -203,6 +208,27 @@
     .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%) translateY(20px); background: var(--pop); color: var(--ink); border: 1px solid var(--card-border); border-radius: 999px; padding: 8px 20px; font-size: 13px; opacity: 0; pointer-events: none; transition: opacity .25s, transform .25s; z-index: 90; }
     .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
+    .modal-bg {
+      position: fixed; inset: 0; background: rgba(12, 16, 32, .55);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 80; padding: 16px;
+    }
+    .modal-bg[hidden] { display: none !important; }
+    .modal {
+      width: min(520px, 100%); background: var(--pop); border: 1px solid var(--card-border);
+      border-radius: var(--r); padding: 16px 18px 14px; box-shadow: 0 16px 40px rgba(0,0,0,.35);
+    }
+    .modal h4 { font-size: 14px; margin-bottom: 6px; }
+    .modal .hint { font-size: 12px; color: var(--ink-dim); margin-bottom: 10px; line-height: 1.55; }
+    .modal textarea {
+      width: 100%; min-height: 150px; resize: vertical; border-radius: 12px;
+      border: 1px solid var(--card-border); background: var(--chip); color: var(--ink);
+      font-family: var(--mono); font-size: 12px; padding: 10px 12px; outline: none;
+    }
+    .modal textarea:focus { border-color: var(--mint); }
+    .modal-err { margin-top: 8px; font-size: 12px; color: var(--down); white-space: pre-wrap; }
+    .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; flex-wrap: wrap; }
+
     /* ================= 响应式 ================= */
     @media (max-width: 900px) {
       .cards { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
@@ -224,7 +250,9 @@
   <div class="banner">
     <div class="brand"><span class="wordmark">TradeGenuis</span><span class="b-sub">箱体突破</span></div>
     <span class="pill"><span class="k" id="hpHitLabel">达标</span><b class="num" id="hpHit">—</b></span>
-    <span class="pill"><span class="k">覆盖</span><b class="num" id="hpCover">—</b></span>
+    <span class="pill pill-edit" id="hpCoverWrap" title="点击配置全市场标的覆盖池" role="button" tabindex="0">
+      <span class="k">覆盖</span><b class="num" id="hpCover">—</b>
+    </span>
     <label class="pill autodrop" title="每个交易日午间收盘与收盘自动全市场扫描">
       <input type="checkbox" id="autoCb" /><span>自动扫描</span><span class="mode-tag" id="autoTimes">11:30 / 15:00</span>
     </label>
@@ -244,7 +272,7 @@
         <button class="tab" data-box-mode="p1" type="button" title="斜向通道：OLS 中轴 + 残差分位数 + ADX">P1通道</button>
       </div>
     </div>
-    <div class="box-mode" id="cryptoIntervalWrap" title="全球池 K 线周期。切换后请强制重扫以按新周期评分" style="display:none">
+    <div class="box-mode" id="cryptoIntervalWrap" title="全市场标的 K 线周期。币/金/股票代币用 Gate 原生 4h/8h/1d；无代币的美股/美指用新浪分钟K；日韩正股无代币则日K。切换后请强制重扫" style="display:none">
       <span class="k">周期</span>
       <div class="tabs" id="cryptoIntervalTabs">
         <button class="tab" data-interval="4h" type="button">4h</button>
@@ -252,12 +280,14 @@
         <button class="tab on" data-interval="1d" type="button">1日</button>
       </div>
     </div>
-    <div class="box-mode" id="poolFilterWrap" title="全球池资产类别筛选" style="display:none">
+    <div class="box-mode" id="poolFilterWrap" title="全市场标的资产类别筛选" style="display:none">
       <span class="k">池</span>
       <div class="tabs" id="poolFilterTabs">
         <button class="tab on" data-pool-filter="all" type="button">全部</button>
         <button class="tab" data-pool-filter="crypto" type="button">仅币</button>
         <button class="tab" data-pool-filter="us_stock" type="button">仅美股</button>
+        <button class="tab" data-pool-filter="jp" type="button">日股</button>
+        <button class="tab" data-pool-filter="kr" type="button">韩股</button>
         <button class="tab" data-pool-filter="gold_index" type="button">黄金+指数</button>
       </div>
     </div>
@@ -280,7 +310,7 @@
     <span class="grow"></span>
     <div class="tabs" id="marketTabs">
       <button class="tab on" data-market="stock" type="button">A股</button>
-      <button class="tab" data-market="crypto" type="button">加密货币</button>
+      <button class="tab" data-market="crypto" type="button">全市场标的</button>
     </div>
     <button class="act go" id="btnScan" type="button">全市场扫描</button>
     <button class="act ghost" id="btnForceScan" type="button" title="忽略1小时缓存，重新全量扫描" style="display:none">强制重扫</button>
@@ -308,10 +338,23 @@
   </section>
 </div>
 <div class="toast" id="toast"></div>
+<div class="modal-bg" id="coverModal" hidden>
+  <div class="modal" role="dialog" aria-labelledby="coverModalTitle">
+    <h4 id="coverModalTitle">覆盖标的池</h4>
+    <p class="hint">逗号或换行分隔。非空时扫描<b>只扫这些标的</b>；清空则恢复默认混合池（币 TOP20 + 黄金 XAUT + 美股20 Gate 永续 + SPX500/SPY/QQQ/IWM + 索尼/三星代币代理 + 日经/KOSPI 日K）。美股优先校验 Gate <b>USDT 永续干净名</b>（AAPL 或 AAPL_USDT → AAPL_USDT；<b>代币化加密市场，非纽交所官方打印</b>）；现货 *X/*G/*ON 仅回退，不用 3L/3S。日韩 Gate 标的为<b>代币代理</b>。</p>
+    <textarea id="coverSymbols" placeholder="AAPL, AAPL_USDT, SPY, SPX500, PLTR, 6758.T, SAMSUNG, 005930, BTCUSDT, 黄金"></textarea>
+    <div class="modal-err" id="coverErr"></div>
+    <div class="modal-actions">
+      <button class="act ghost" type="button" id="btnCoverClear">清空（用默认）</button>
+      <button class="act ghost" type="button" id="btnCoverCancel">取消</button>
+      <button class="act go" type="button" id="btnCoverSave">保存并校验</button>
+    </div>
+  </div>
+</div>
 
 <script>
 "use strict";
-const S = { watch: null, crypto: null, status: null, cfg: null, hot: [], loaded: false, kbars: {}, market: "stock", selBoard: null, flagFilter: "all", tlFilter: "all", poolFilter: "all" };
+const S = { watch: null, crypto: null, status: null, cfg: null, hot: [], loaded: false, kbars: {}, market: "stock", selBoard: null, flagFilter: "all", tlFilter: "all", poolFilter: "all", override: { symbols: [], count: 0, mode: "default" } };
 const $ = id => document.getElementById(id);
 const fmt2 = v => (v === null || v === undefined || isNaN(v)) ? "—" : Number(v).toFixed(2);
 const fmtc = v => (v === null || v === undefined || isNaN(v)) ? "—" : (v >= 1 ? Number(v).toFixed(2) : Number(v).toPrecision(4));
@@ -336,13 +379,15 @@ async function jfetch(path, opts) {
   return r.json();
 }
 async function loadAll() {
-  const [w, c, st, cfg] = await Promise.all([
+  const [w, c, st, cfg, ov] = await Promise.all([
     jfetch("api/watchlist"),
     jfetch("api/crypto").catch(() => null),
     jfetch("api/status").catch(() => null),
     jfetch("api/config").catch(() => null),
+    jfetch("api/global_pool/override").catch(() => null),
   ]);
   S.watch = w; S.crypto = c; S.status = st; S.cfg = cfg; S.loaded = true;
+  if (ov) S.override = ov;
   S.hot = (w && w.hot_topics) || [];
   renderAll();
   jfetch("api/hot").then(hot => {
@@ -399,25 +444,36 @@ function intervalLabel(iv) {
 function assetClassOf(r) {
   return r.asset_class || (r.market === "crypto" ? "crypto" : "stock");
 }
-function assetBadgeHTML(cls) {
-  const lab = { crypto: "币", gold: "金", us_index: "指数", us_stock: "美股" }[cls];
+function assetBadgeHTML(r) {
+  const cls = typeof r === "string" ? r : assetClassOf(r);
+  const tok = typeof r === "object" && r && r.tokenized;
+  const lab = {
+    crypto: "币", gold: "金",
+    us_index: tok ? "美指代币" : "美指", us_stock: tok ? "美股代币" : "美股",
+    jp_index: tok ? "日指代理" : "日指", jp_stock: tok ? "日股代理" : "日股",
+    kr_index: tok ? "韩指代理" : "韩指", kr_stock: tok ? "韩股代理" : "韩股",
+  }[cls];
   if (!lab) return "";
-  return `<span class="asset-badge ${cls}">${lab}</span>`;
+  return `<span class="asset-badge ${cls}${tok ? " tokenized" : ""}">${lab}</span>`;
 }
 function matchPoolFilter(r, flt) {
   if (!flt || flt === "all") return true;
   const c = assetClassOf(r);
-  if (flt === "gold_index") return c === "gold" || c === "us_index";
+  if (flt === "gold_index") return c === "gold" || String(c).endsWith("_index");
+  if (flt === "jp") return c === "jp_stock" || c === "jp_index";
+  if (flt === "kr") return c === "kr_stock" || c === "kr_index";
   return c === flt;
 }
 function poolCountBits(rows) {
-  const n = { crypto: 0, gold: 0, us_index: 0, us_stock: 0 };
+  const n = { crypto: 0, gold: 0, us_index: 0, us_stock: 0, jp_index: 0, jp_stock: 0, kr_index: 0, kr_stock: 0 };
   (rows || []).forEach(r => { const c = assetClassOf(r); if (n[c] != null) n[c]++; });
   const bits = [];
   if (n.crypto) bits.push("币" + n.crypto);
   if (n.gold) bits.push("金" + n.gold);
-  if (n.us_index) bits.push("指数" + n.us_index);
+  if (n.us_index) bits.push("美指" + n.us_index);
   if (n.us_stock) bits.push("美股" + n.us_stock);
+  if (n.jp_index + n.jp_stock) bits.push("日" + (n.jp_index + n.jp_stock));
+  if (n.kr_index + n.kr_stock) bits.push("韩" + (n.kr_index + n.kr_stock));
   return bits.join(" · ");
 }
 function flagStageLabel(stage) {
@@ -530,10 +586,14 @@ function renderAll() {
 
   $("hpHitLabel").textContent = fam === "high_flag" ? "旗形" : fam === "trendline" ? "趋势线" : "达标";
   $("hpHit").textContent = S.loaded ? hits.length : "—";
-  $("hpCover").textContent = S.loaded
-    ? (scope === "crypto" ? ((data.screened ?? data.universe_size ?? rows.length) + " 标的") :
-       scope === "market" ? (data.universe_size ?? "—") + " 只" : "自选池")
-    : "—";
+  if (!S.loaded) {
+    $("hpCover").textContent = "—";
+  } else if (isCrypto) {
+    const ov = S.override || {};
+    $("hpCover").textContent = ov.mode === "override" ? ((ov.count || 0) + " 只") : "默认";
+  } else {
+    $("hpCover").textContent = scope === "market" ? (data.universe_size ?? "—") + " 只" : "自选池";
+  }
   $("poolCount").textContent = S.loaded ? hits.length : "";
   if (fam === "high_flag") {
     const nBuy = flagHits.filter(r => r.flag_stage === "secondary_buy").length;
@@ -546,7 +606,7 @@ function renderAll() {
       + (nBrk || nBo ? ` <span class="mode-tag">跌破 ${nBrk} · 突破 ${nBo}</span>` : "");
   } else if (scope === "crypto") {
     const bits = poolCountBits(rows);
-    $("cardsTitle").innerHTML = `全球池 <span class="plan-count" id="poolCount">${S.loaded ? rows.length : ""}</span>`
+    $("cardsTitle").innerHTML = `全市场标的 <span class="plan-count" id="poolCount">${S.loaded ? rows.length : ""}</span>`
       + (bits ? ` <span class="mode-tag">${bits}</span>` : "")
       + ` <span class="mode-tag" style="color:var(--up)">达标 ${hits.length}</span>`;
   } else if (S.selBoard) {
@@ -568,6 +628,9 @@ function renderAll() {
   } else if (isCrypto && S.loaded && cfgIv !== scanIv && (rows.length || data.updated || data.as_of)) {
     hintText = (hintText ? hintText + " · " : "") +
       `扫描结果来自「${intervalLabel(scanIv)}」，当前为「${intervalLabel(cfgIv)}」，请强制重扫以更新`;
+  } else if (isCrypto && S.loaded && ((data.override_fingerprint || "") !== ((S.override && S.override.fingerprint) || "")) && (rows.length || data.updated || data.as_of)) {
+    hintText = (hintText ? hintText + " · " : "") +
+      "覆盖池已变更，当前结果来自旧池，请强制重扫";
   } else if (S.loaded && cfgMode !== scanMode && (rows.length || data.updated || data.as_of)) {
     hintText = (hintText ? hintText + " · " : "") +
       `评分来自「${boxModeLabel(scanMode)}」，当前为「${boxModeLabel(cfgMode)}」，请强制重扫以更新评分`;
@@ -647,7 +710,7 @@ function renderCards(rows) {
   }
   const isCrypto = S.market === "crypto";
   const fam = currentFamily();
-  // 全球池：展示进池子全部标的（可按币/美股/黄金+指数筛选），达标高亮
+  // 全市场标的：展示进池子全部标的（可按币/美股/日股/韩股/黄金+指数筛选），达标高亮
   // A股：默认只展示达标；选中板块后展示该板块全部股票（按评分降序）
   // 高位旗形：批量筛选旗面 / 二次买点（不走四条件达标）
   let shown;
@@ -708,7 +771,7 @@ function renderCards(rows) {
   } else if (isCrypto) {
     shown = rows.filter(r => matchPoolFilter(r, S.poolFilter)).slice().sort((a, b) => (b.chg || 0) - (a.chg || 0));
     if (S.poolFilter !== "all") {
-      $("cardsTitle").innerHTML = `全球池 <span class="plan-count" id="poolCount">${shown.length}</span>`
+      $("cardsTitle").innerHTML = `全市场标的 <span class="plan-count" id="poolCount">${shown.length}</span>`
         + (poolCountBits(shown) ? ` <span class="mode-tag">${poolCountBits(shown)}</span>` : "");
     }
   } else if (S.selBoard) {
@@ -730,7 +793,7 @@ function renderCards(rows) {
           : S.tlFilter === "resistance_break" ? "暂无刚突破压力" : "暂无有效趋势线")
       : (S.selBoard ? `该板块暂无股票` : "暂无数据");
     box.innerHTML = `<div class="empty"><div class="big">NO SIGNAL</div><p>${emptyMsg}</p>
-      <button class="act go" type="button" onclick="doScan(false)">${isCrypto ? "全球池扫描" : "全市场扫描"}</button></div>`;
+      <button class="act go" type="button" onclick="doScan(false)">${isCrypto ? "全市场标的扫描" : "全市场扫描"}</button></div>`;
     return;
   }
   // 币圈仍列出全部进池标的；K 线只在卡片进入视口附近才拉取（见 observeCardCharts）
@@ -787,10 +850,15 @@ function cardHTML(r, i) {
   const hiLite = isFlag ? !!r.secondary_breakout_buy
     : isTl ? (r.tl_event && r.tl_event !== "none")
     : (isCrypto && r.qualified);
-  const aBadge = isCrypto ? assetBadgeHTML(assetClassOf(r)) : "";
+  const aBadge = isCrypto ? assetBadgeHTML(r) : "";
+  const ivNote = (isCrypto && r.interval_note) ? `<span class="interval-note">${r.interval_note}</span>` : "";
+  const tokLab = (r.token_role === "proxy") ? "代币代理" : "股票代币";
+  const tokNote = (isCrypto && r.tokenized && !r.interval_note)
+    ? `<span class="token-note" title="Gate 代币化市场，跟踪正股但可能有基差，非交易所官方行情">${tokLab}</span>` : "";
+  const cd = r.gate_contract ? `${r.code} · ${r.gate_contract}` : r.code;
   return `<article class="sig${hiLite ? ' q' : ''}" data-code="${r.code}" data-market="${S.market}" data-qualified="${r.qualified ? 1 : 0}" style="animation-delay:${Math.min(i * 50, 400)}ms">
     <div class="sig-top">
-      <div><div class="nm">${r.name}${aBadge}${qBadge}${fgBadge}<span data-edge-host>${evBadge}</span></div><div class="cd">${r.code}</div></div>
+      <div><div class="nm">${r.name}${aBadge}${qBadge}${fgBadge}<span data-edge-host>${evBadge}</span>${ivNote}${tokNote}</div><div class="cd">${cd}</div></div>
       <div class="sig-top-right"><span class="px" data-px>${price}</span>
         <span class="chg ${clsOf(r.chg)}" data-chg>${chgText}</span>
         <span class="score-badge">${isFlag ? (r.flag_quality || "ok") : isTl ? (r.tl_quality || "none") : r.score}</span></div>
@@ -890,6 +958,15 @@ async function loadChart(code, market) {
   if (host && (fam === "high_flag" || fam === "trendline")) {
     host.innerHTML = "";
   } else if (host && d.box) host.innerHTML = edgeBadgeHTML(d.box.edge_event);
+  if (card && market === "crypto" && d.interval_note) {
+    const nm = card.querySelector(".nm");
+    if (nm && !nm.querySelector(".interval-note")) {
+      const note = document.createElement("span");
+      note.className = "interval-note";
+      note.textContent = d.interval_note;
+      nm.appendChild(note);
+    }
+  }
 }
 function observeCardCharts() {
   disconnectCharts();
@@ -1125,10 +1202,10 @@ let localScanWait = false;
 let scanPollTimer = null;
 let scanWasRunning = false;
 function scanBtnLabel() {
-  return S.market === "crypto" ? "全球池扫描" : "全市场扫描";
+  return S.market === "crypto" ? "全市场标的扫描" : "全市场扫描";
 }
 function scanModeLabel(mode) {
-  return { market: "全市场扫描", quick: "全市场快扫", crypto: "全球池扫描", pool: "自选池扫描" }[mode] || "扫描";
+  return { market: "全市场扫描", quick: "全市场快扫", crypto: "全市场标的扫描", pool: "自选池扫描" }[mode] || "扫描";
 }
 function isScanRunning(st) {
   if (!st) return false;
@@ -1299,12 +1376,13 @@ async function setCryptoInterval(iv) {
     S.kbars = {};
     resetKlineQueue();
     renderAll();
-    toast("K线周期：" + intervalLabel(iv) + "。请强制重扫以按新周期评分");
+    toast("K线周期：" + intervalLabel(iv) + "。币/金/股票代币用 Gate 原生周期；无代币美股用新浪分钟K；日韩正股用日K。请强制重扫");
   } catch (e) { toast("周期保存失败"); }
 }
 
 function setPoolFilter(flt) {
-  if (flt !== "all" && flt !== "crypto" && flt !== "us_stock" && flt !== "gold_index") return;
+  if (flt !== "all" && flt !== "crypto" && flt !== "us_stock" && flt !== "gold_index"
+      && flt !== "jp" && flt !== "kr") return;
   if (S.poolFilter === flt) return;
   S.poolFilter = flt;
   renderAll();
@@ -1332,6 +1410,53 @@ function switchMarket(market) {
   if (market === "crypto") S.selBoard = null;   // 板块筛选仅 A股
   $("btnScan").textContent = scanBtnLabel();
   renderAll();
+}
+
+function openCoverModal() {
+  const ov = S.override || {};
+  $("coverSymbols").value = (ov.symbols || []).join("\n");
+  $("coverErr").textContent = "";
+  $("coverModal").hidden = false;
+  setTimeout(() => $("coverSymbols").focus(), 30);
+}
+function closeCoverModal() {
+  $("coverModal").hidden = true;
+}
+async function saveCoverPool() {
+  const text = $("coverSymbols").value;
+  $("coverErr").textContent = "";
+  try {
+    const r = await jfetch("api/global_pool/override", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ symbols: text })
+    });
+    S.override = r;
+    const nRej = (r.rejected || []).length;
+    if (nRej) {
+      $("coverErr").textContent = (r.rejected || []).map(x => x.code + "：" + x.reason).join("\n");
+    }
+    renderAll();
+    if (r.mode === "override") {
+      toast("覆盖池 " + r.count + " 只" + (nRej ? "（已拒绝无效项）" : "") + "。请强制重扫");
+    } else {
+      toast(nRej ? "有效项为空，已回默认池" : "已恢复默认混合池。请强制重扫");
+    }
+    if (!nRej) closeCoverModal();
+  } catch (e) { toast("覆盖池保存失败"); }
+}
+async function clearCoverPool() {
+  try {
+    const r = await jfetch("api/global_pool/override", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "clear" })
+    });
+    S.override = r;
+    $("coverSymbols").value = "";
+    $("coverErr").textContent = "";
+    renderAll();
+    closeCoverModal();
+    toast("已清空覆盖，使用默认混合池。请强制重扫");
+  } catch (e) { toast("清空失败"); }
 }
 
 /* =============================== 启动 =============================== */
@@ -1371,6 +1496,19 @@ function boot() {
   });
   document.querySelectorAll("#poolFilterTabs .tab").forEach(t => {
     t.addEventListener("click", () => setPoolFilter(t.dataset.poolFilter));
+  });
+  $("hpCoverWrap").addEventListener("click", openCoverModal);
+  $("hpCoverWrap").addEventListener("keydown", e => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openCoverModal(); }
+  });
+  $("btnCoverCancel").addEventListener("click", closeCoverModal);
+  $("btnCoverSave").addEventListener("click", saveCoverPool);
+  $("btnCoverClear").addEventListener("click", clearCoverPool);
+  $("coverModal").addEventListener("click", e => {
+    if (e.target === $("coverModal")) closeCoverModal();
+  });
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape" && !$("coverModal").hidden) closeCoverModal();
   });
   refresh().then(() => {
     refreshQuotes();

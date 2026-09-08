@@ -1,67 +1,125 @@
-# 加密货币 Tab：全球池与 K 线周期
+# 全市场标的 Tab：全球池、多源行情与覆盖池
 
-加密货币页不再只扫「24h 涨幅 TOP30 USDT 永续」，而是一个**混合全球池**。A 股 Tab、四条件打分、形态族（箱体 / 高位旗形 / 趋势线）算法不变；全球池标的复用同一套 OHLC 形态引擎，评分走原币圈 3 条件口径。
+全市场标的页（内部仍为 `data-market="crypto"` / `/api/crypto`，以免打断缓存路径）扫描一个**混合全球池**。A 股 Tab、四条件打分、形态族算法不变；全球池复用同一套 OHLC 形态引擎，评分走原币圈 3 条件口径。
 
-常量集中在 [`global_pool.py`](../global_pool.py)，改列表即可改池子，不必改扫描主流程。
+常量集中在 [`global_pool.py`](../global_pool.py)（含 `GATE_EQUITY_MAP`），无代币时的日K / 美股分钟K 在 [`equity_sources.py`](../equity_sources.py)。
 
-## 宇宙
+## 股票代币 / 代币代理（重要）
 
-| 类别 | `asset_class` | 数量 | 来源 |
+美/日/韩 **有 Gate 市场** 的标的走 **代币化加密市场**（原生 **4h / 8h / 1d**，VPS 可直连）。**不是**纽交所 / 东证 / 韩交所官方打印，跟踪正股但存在基差。
+
+优先级（VPS 表）：
+
+1. **USDT 永续干净名**（`AAPL_USDT`、`SPX500_USDT`、`SONY_USDT`）
+2. 失败再试现货 `*X` / `*G` / `*ON`（如 `AAPLX_USDT`）。**不用** `3L`/`3S`
+3. 仍无：美股/美指新浪 `getMinK`；日韩正股 / 日经 / KOSPI 日K
+
+日韩 Gate 标的（索尼、三星）看板标 **代币代理**；美股/美指标 **股票代币**。
+
+| 内部代码 | 主路径（永续） | 现货回退 | 说明 |
 |---|---|---|---|
-| USDT 永续涨幅榜 | `crypto` | `CRYPTO_TOP_N = 20`（原 30） | Binance `fapi` 24h ticker，失败后**粘性** Gate.io USDT 永续 |
-| 黄金（1 只） | `gold` | 1 | 见下 |
-| 美股指数 | `us_index` | `US_INDICES`（默认 4） | Yahoo chart：`^GSPC` 标普500、`^DJI` 道指、`^IXIC` 纳指、`^NDX` 纳斯达克100 |
-| 美股大盘 | `us_stock` | `US_STOCKS` 约 20 | Yahoo：AAPL / MSFT / NVDA / … / NFLX |
+| 默认美股 20 | `{TICKER}_USDT` | 有核对过的 `*X`/`*G` | AAPL/MSFT/NVDA/GOOGL/AMZN/META/TSLA/COIN/BABA/NFLX/AMD/AVGO/ARM/PLTR/HOOD/MSTR/JPM/WMT/IBM/ORCL。`WMTX` 不是沃尔玛 |
+| 覆盖可解析 | `BRKB_USDT` / `V_USDT` / `UNH_USDT` 等 | 部分 `*X` | 不进默认宇宙 |
+| `MA` | （无） | `MAX_USDT` | 永续无 MA；现货 `MA_USDT` 是 Mind AI |
+| `.INX` | **`SPX500_USDT`** | — | **不要** `SPX_USDT`（梗币） |
+| `SPY`/`QQQ`/`IWM` | 对应 `_USDT` 永续 | `SPYX`/`QQQX` | 默认美指/ETF |
+| `SQQQ` | `SQQQ_USDT` | — | 可选，仅覆盖池 |
+| `.DJI` | `US30_USDT` | — | 覆盖可解析。**不要** `DIA_USDT`（加密 DIA） |
+| `.NDX` | `NAS100_USDT` | — | 覆盖可解析 |
+| `.IXIC` | （无） | | 新浪分钟K |
+| `7203.T` | （无） | | 日元丰田日K。无 TOYOTA 代币；`TM_USDT` 是美元 ADR |
+| `6758.T` | `SONY_USDT` | | **代币代理**（默认日股） |
+| `005930` | `SAMSUNG_USDT` | | **代币代理**（默认韩股） |
+| `000660` | `SKHYNIX_USDT` | | 覆盖可解析 |
+| `NKY`/KOSPI/KOSDAQ | （无） | | 日K 次源。勿用 `JPN225_USDT` |
 
-合计约 **20 + 1 + 4 + 20**。黄金永续若出现在涨幅榜里，**不占用** TOP20 名额。
+覆盖校验：`AAPL` 与 `AAPL_USDT` 都解析到 Gate `AAPL_USDT`。`SPX500` / `SPX500_USDT` → `.INX`。
 
-看板 `market` 仍为 `crypto`（同一 Tab、`/api/crypto`、`/api/kline?market=crypto`）。卡片用徽章区分 币 / 金 / 指数 / 美股。
+无对应代币时：
 
-## 黄金符号（运行时选一只）
+- **美股 / 美指 / 美股 ADR**：新浪 `US_MinKService.getMinK`（`type=240` 约 4h；`type=60` 约 1h 再合成 8h）→ 再不行才日K
+- **日韩正股 / 日经 / KOSPI**：Sina / Naver **日K**，4h/8h 带 `interval_note`
+
+## 宇宙（默认混合池）
+
+| 类别 | `asset_class` | 数量 | 主源 |
+|---|---|---|---|
+| USDT 永续涨幅榜 | `crypto` | `CRYPTO_TOP_N = 20` | Binance `fapi` 24h ticker，失败后**粘性** Gate.io；股票代币 / xStock / 杠杆合约不占 TOP20 |
+| 黄金（1 只） | `gold` | 1 | Gate **`XAUT_USDT` 现货**（及永续；不要用 `XAU_USDT` 当首选）→ `XAUUSDT` / `PAXGUSDT` |
+| 美指/ETF | `us_index` | 4 | Gate：`.INX`→`SPX500_USDT`，`SPY`/`QQQ`/`IWM` 永续 |
+| 美股 | `us_stock` | 20 | Gate 永续干净名；失败再现货 *X；再无则新浪 getMinK |
+| 日经 225 | `jp_index` | 1 | 新浪 `gi.finance.sina.com.cn/hq/daily?symbol=NKY`（无 NIKKEI 代币） |
+| 日股 | `jp_stock` | 1 | 索尼 Gate `SONY_USDT` 代币代理 |
+| KOSPI | `kr_index` | 1 | Naver 日K（无 KOSPI 代币） |
+| 韩股 | `kr_stock` | 1 | Gate `SAMSUNG_USDT` 代币代理 |
+
+合计约 **20 + 1 + 4 + 20 + 1 + 1 + 1 + 1**。黄金永续若出现在涨幅榜里，**不占用** TOP20 名额。
+
+看板 `market` 仍为 `crypto`。卡片徽章区分 币 / 金 / 美指(代币) / 美股(代币) / 日股(代理) / 韩股(代理)。
+
+## 明确不用的源
+
+- **Yahoo Finance**（Tom 的 VPS 上 HTTP 403）。扫描与 K 线主路径不再 Yahoo-first。
+- Stooq
+- 东财 **push2his K 线**（push2delay **报价**仅作无代币时的校验备份）
+- Finnhub / Alpha Vantage（需要 Key）
+- 杠杆/反向代币（`3L`/`3S`、CSOP 2L 等不当默认；`*X` 仅在确认为 xStock 时使用）
+- Twelve Data demo（仅 AAPL/QQQ，不作通用源）
+
+## 黄金符号
 
 优先级（成功即停，失败则降级，整轮扫描不中止）：
 
-1. **Binance / Gate 黄金永续**（与现有币圈后端相同，含粘性 Gate）：`XAUUSDT` → `PAXGUSDT`
-2. **Yahoo**：`GC=F`（COMEX 黄金期货）→ `GLD`（SPDR 黄金 ETF）
+1. **Gate `XAUT_USDT` 现货**（及永续 ticker / K 线）
+2. 交易所黄金永续 `XAUUSDT` / `PAXGUSDT`
 
-本仓库验证环境（Binance 官方超时后粘性 Gate）：**最终选用 `XAUUSDT`（Gate USDT 永续）**，24h 成交额充足，展示名「黄金」。`PAXGUSDT` 同样存在但流动性更低，仅作次选。Yahoo `GC=F`/`GLD` 在部分 IP 上会 HTTP 429，代码会短暂重试后跳过。
-
-展示名固定为「黄金」。扫描结果 `crypto.json` 的 `gold` 字段记录实际 `code` 与 `source`（`crypto` 或 `yahoo`）。国内 VPS 上若币所与 Yahoo 都超时，该行被跳过并计入 `skipped`。
+展示名固定为「黄金」。`crypto.json` 的 `gold` 字段记录实际 `code` 与 `source`。
 
 ## K 线周期 `crypto_interval`
 
-写入 `data/config.json`，与 `box_mode` / `pattern_family` 一样经 `GET/POST /api/config` 暴露。
+写入 `data/config.json`，经 `GET/POST /api/config` 暴露。非法值规范化为 `1d`。
 
-| 值 | 含义 | 默认 |
-|---|---|---|
-| `4h` | 4 小时 K | |
-| `8h` | 8 小时 K | |
-| `1d` | 日 K | **是** |
+| 值 | 币 / 金 / **股票代币**（Gate 原生） | 无代币美股 / 美指 | 日韩正股 / 日经 / KOSPI |
+|---|---|---|---|
+| `4h` / `8h` | 原生周期 | 新浪 `getMinK` | **无稳定多日分钟历史** → 回退 **日K**，并带 `interval_note` |
+| `1d` | 日K | 日K | 日K（新浪 / Naver） |
 
-非法值规范化为 `1d`。`GET /api/config` 另给 `crypto_intervals: ["4h","8h","1d"]` 供 UI 画胶囊。
+股票代币 K 线**不**走 Binance。主路径永续干净名，失败再现货 `*X`/`*G`。未上市才回退新浪。日韩真·1h 需 VPN/Yahoo。
 
-- **Binance USDT 永续**：原生 `4h` / `8h` / `1d`
-- **Gate.io USDT 永续**：同样使用 `4h` / `8h` / `1d` 字符串（已核对 [Futures candlesticks](https://www.gate.com/docs/developers/apiv4/en/#get-futures-candlesticks)）
-- **Yahoo 股票 / 指数 / 黄金期货**：日线用 `interval=1d`；**4h/8h 没有稳定原生周期**，改为拉 `1h` 再按时钟整点重采样（`resample_ohlc_hours`）。美股 1h 仅交易时段，合成根数会少于 7×24 加密货币。
+## 覆盖池
 
-4h/8h 的 `date` 为 `YYYY-MM-DD HH:MM`，避免图上多根 K 叠成同一天。A 股日线仍为 `YYYY-MM-DD`。
+顶栏 **「覆盖」** 可点开编辑器：textarea 填符号（逗号或换行），保存前逐只 `validate_symbol`。
+
+- 持久化：`data/global_override_pool.json`（`{"symbols":[...]}`）
+- **非空**：扫描**只扫这些标的**（仍应用周期与形态）
+- **空**：默认混合池
+- 校验：`AAPL` / `AAPL_USDT` / `AAPLX` / `PLTR` / `SPX500` / `SAMSUNG` → Gate 市场 / 黄金 / Sina / Naver
+- 无效代码不写入；接口返回 `rejected: [{code, reason}]`
+- 药丸显示：覆盖时「N 只」，否则「默认」
+
+```
+POST /api/global_pool/validate  {symbols:[]} → {ok:[], bad:[{code,reason}]}
+GET  /api/global_pool/override
+POST /api/global_pool/override  {symbols:[]} | {action:"clear"}
+```
+
+扫描 1 小时缓存身份含 `override_fingerprint`，改覆盖池后不会误用旧结果。
 
 ## 缓存身份
 
-扫描结果 1 小时缓存对加密货币 Tab 额外比对 `crypto_interval`（逻辑同 `box_mode` / `pattern_family` 不一致则不命中）。缺字段的旧 `crypto.json` 视为 `1d`。
-
-K 线内存/磁盘缓存键在 `market=crypto` 时含周期，避免 4h 与 1d 串盘。
+扫描结果对全市场标的 Tab 额外比对 `crypto_interval` 与覆盖池指纹。K 线缓存键在 `market=crypto` 时含周期。
 
 ## 失败降级
 
-- 币所 24h ticker 全失败：仍扫描黄金（若可得）+ 指数 + 美股
-- 单票 Yahoo / K 线超时或不足 40 根：跳过该票，进度结束时汇报 `skipped`
-- 不引入 `yfinance`，只用 Yahoo v8 chart HTTP（`query1` → `query2`，超时 10s）
+- 币所 24h ticker 全失败：仍扫描黄金（若可得）+ 指数 + 股票，或只扫覆盖池
+- Gate 代币 K 线失败：美股回退新浪分钟K/日K；日韩回退 Naver/Sina 日K
+- 单票超时或不足 40 根：跳过该票，进度结束时汇报 `skipped`
+- 不引入 `yfinance`
 
 ## 看板
 
-加密货币 Tab 显示：
-
-- 周期胶囊 **4h / 8h / 1日**（切换会 POST config，并提示强制重扫）
-- 池筛选：全部 / 仅币 / 仅美股 / 黄金+指数
-- 标题「全球池」及各类数量
+- Tab 文案 **全市场标的**（内部 `data-market="crypto"` 不变）
+- 周期胶囊 **4h / 8h / 1日**
+- 池筛选：全部 / 仅币 / 仅美股 / 日股 / 韩股 / 黄金+指数
+- 有代币时徽章带「代币」，副标题展示 Gate 合约名
+- 「覆盖」编辑覆盖池

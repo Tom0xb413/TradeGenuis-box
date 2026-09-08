@@ -147,7 +147,7 @@ class DashboardLazyLoadContractTest(unittest.TestCase):
         self.assertIn("非箱体·振幅过大", self.html)
 
     def test_crypto_still_lists_pool(self):
-        self.assertIn("全球池：展示进池子全部标的", self.html)
+        self.assertIn("全市场标的：展示进池子全部标的", self.html)
         self.assertIn("chartPriority", self.html)
 
 
@@ -255,6 +255,22 @@ class KlineCacheTest(unittest.TestCase):
         self.assertEqual(self.calls["crypto"], 1)
         self.assertEqual(a["bars"][-1]["close"], b["bars"][-1]["close"])
         self.assertTrue(any(self.disk.glob("crypto_BTCUSDT_*.json")))
+
+    def test_equity_kline_uses_global_instrument(self):
+        inst = {
+            "code": "AAPL", "name": "苹果", "price": 190.0, "chg": 1.2,
+            "bars": _bars(), "source": "sina", "asset_class": "us_stock",
+            "interval_note": "股票/指数无稳定 4h/8h 历史，已用日K",
+            "interval_limited": True,
+        }
+        with patch.object(sc, "fetch_global_instrument", return_value=inst) as mock_g:
+            out = server.get_kline("AAPL", market="crypto")
+        mock_g.assert_called_once()
+        self.assertEqual(out["code"], "AAPL")
+        self.assertEqual(out["source"], "sina")
+        self.assertTrue(out.get("interval_limited"))
+        self.assertIn("日K", out.get("interval_note") or "")
+        self.assertEqual(self.calls["crypto"], 0)
 
     def test_stale_error_file_is_ignored(self):
         path = server._kline_disk_path("stock", "600000")

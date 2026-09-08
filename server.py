@@ -9,7 +9,7 @@ TradeGenuis · 箱体突破 本地看板服务器
 接口：
   GET  /                    看板页
   GET  /api/watchlist       最近一次 A 股扫描结果（磁盘缓存）
-  GET  /api/crypto          最近一次币圈扫描结果（磁盘缓存）
+  GET  /api/crypto          最近一次全市场标的扫描结果（磁盘缓存）
   GET  /api/pool            自选池
   POST /api/pool            增删自选池
   GET  /api/kline?code=     个股日K（含箱体/试盘；成功结果约 45 分钟内存+磁盘缓存）
@@ -17,6 +17,8 @@ TradeGenuis · 箱体突破 本地看板服务器
                             已在扫描时返回 {status:running, scan_progress}（加入当前任务，不开第二轮）
   GET  /api/status          扫描状态：scanning + scan_progress + 最近 scan_log
   GET/POST /api/config      配置（自动扫描 / Telegram / box_mode / pattern_family / scan_workers / crypto_interval）
+  GET/POST /api/global_pool/override  覆盖标的池 读取/保存/清空
+  POST /api/global_pool/validate      校验覆盖符号 {symbols:[]}
 
 自动扫描调度：config.auto 开启时，每个交易日 11:30 与 15:00 自动执行全市场扫描（绕过 1h 缓存）。
 """
@@ -34,6 +36,7 @@ from pathlib import Path
 from urllib.parse import unquote
 
 import scanner as sc
+import global_pool as gp
 
 ROOT = Path(__file__).resolve().parent
 WATCH_FILE = ROOT / "data" / "watchlist.json"
@@ -47,7 +50,7 @@ DEFAULT_CONFIG = {
     "tg_chat": "",
     "box_mode": "classic",              # classic | p0 | p1（斜向通道）
     "pattern_family": "box",            # box | high_flag | trendline（默认 box，不打断现有用户）
-    "crypto_interval": "1d",            # 加密货币 Tab K 线/扫描周期：4h | 8h | 1d
+        "crypto_interval": "1d",            # 全市场标的 Tab K 线/扫描周期：4h | 8h | 1d
     "scan_workers": sc.SCAN_WORKERS_DEFAULT,  # 4–32，亦可用环境变量 SCAN_WORKERS
 }
 
@@ -81,6 +84,17 @@ LOCK = threading.RLock()
 # 日K 变化慢：内存 + 落盘约 45 分钟。与 SCAN_CACHE_TTL（扫描结果 1h）独立。
 KLINE_CACHE_TTL = 45 * 60
 KLINE_DISK_DIR = ROOT / "data" / "kline_cache"
+
+
+def override_payload() -> dict:
+    """覆盖池当前状态（空 = 默认混合池）。"""
+    symbols = gp.load_override_symbols()
+    return {
+        "symbols": symbols,
+        "count": len(symbols),
+        "mode": "override" if symbols else "default",
+        "fingerprint": gp.override_fingerprint(symbols),
+    }
 
 
 def as_truthy(v) -> bool:
@@ -179,6 +193,9 @@ def scan_cache_response(mode: str, force: bool = False) -> dict | None:
     if mode == "crypto":
         data_iv = sc.normalize_crypto_interval(data.get("crypto_interval"))
         if data_iv != configured_crypto_interval():
+            return None
+        data_fp = str(data.get("override_fingerprint") or "")
+        if data_fp != gp.override_fingerprint():
             return None
     out = attach_cache_meta(data, from_cache=True)
     out["status"] = "cached"
@@ -421,7 +438,7 @@ def start_or_join_scan(mode: str, top: int = sc.MARKET_TOP, force: bool = False)
     cached = scan_cache_response(mode, force=force)
     if cached:
         log("命中1小时扫描缓存，跳过全量扫描" +
-            ("（币圈）" if mode == "crypto" else
+            ("（全市场标的）" if mode == "crypto" else
              "（全市场）" if mode in ("market", "quick") else "（自选池）"))
         with LOCK:
             cached["scanning"] = STATE["scanning"]
@@ -434,7 +451,7 @@ def start_or_join_scan(mode: str, top: int = sc.MARKET_TOP, force: bool = False)
         progress = snapshot_scan_progress()
     log("手动触发扫描…" + ("（全市场全量）" if mode == "market" else
                             ("（全市场快扫）" if mode == "quick" else
-                             ("（币圈）" if mode == "crypto" else "（自选池）"))) +
+                             ("（全市场标的）" if mode == "crypto" else "（自选池）"))) +
         (" 强制刷新" if force else ""))
     threading.Thread(
         target=scan_worker,
@@ -655,7 +672,7 @@ def _with_box(payload: dict) -> dict:
 
 def get_kline(code: str, lmt: int = 160, market: str = "stock") -> dict | None:
     """个股/币/全球池 K 线 + 箱体。成功结果缓存 ~45 分钟；错误与空序列不写入。
-    加密货币 Tab 使用配置中的 crypto_interval，缓存键含周期以免 4h/1d 串用。"""
+    全市场标的 Tab 使用配置中的 crypto_interval，缓存键含周期以免 4h/1d 串用。"""
     interval = configured_crypto_interval() if market == "crypto" else ""
     hit = _kline_mem_get(market, code, interval)
     if hit:
@@ -666,14 +683,24 @@ def get_kline(code: str, lmt: int = 160, market: str = "stock") -> dict | None:
         return _with_box(hit)
     try:
         if market == "crypto":
-            bars = sc.fetch_tab_kline(code, interval=interval, limit=sc.CRYPTO_LOOKBACK)
+            inst = sc.fetch_global_instrument(code, interval=interval, lookback=sc.CRYPTO_LOOKBACK)
+            bars = list((inst or {}).get("bars") or [])
             if not bars:
                 return {"code": code, "error": "empty kline"}
             payload = {
-                "code": code, "name": code, "price": bars[-1]["close"],
-                "chg": None, "turnover": None, "volume_ratio": None,
+                "code": (inst or {}).get("code") or code,
+                "name": (inst or {}).get("name") or code,
+                "price": (inst or {}).get("price") if (inst or {}).get("price") is not None else bars[-1]["close"],
+                "chg": (inst or {}).get("chg"),
+                "turnover": None, "volume_ratio": None,
                 "bar_date": bars[-1]["date"], "bars": bars,
                 "crypto_interval": interval,
+                "interval_note": (inst or {}).get("interval_note"),
+                "interval_limited": bool((inst or {}).get("interval_limited")),
+                "source": (inst or {}).get("source"),
+                "asset_class": (inst or {}).get("asset_class"),
+                "tokenized": bool((inst or {}).get("tokenized")),
+                "gate_contract": (inst or {}).get("gate_contract"),
             }
         else:
             quote = sc.fetch_quote(code)
@@ -785,6 +812,8 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 pass
             self._json(get_kline(code, lmt, market))
+        elif p == "/api/global_pool/override":
+            self._json(override_payload())
         else:
             self._json({"error": "not found"}, 404)
 
@@ -836,6 +865,46 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "stocks": stocks})
             else:
                 self._json({"error": "非法请求"}, 400)
+        elif p == "/api/global_pool/validate":
+            body = self._body()
+            raw = body.get("symbols")
+            if isinstance(raw, str):
+                symbols = gp.parse_symbol_text(raw)
+            elif isinstance(raw, list):
+                symbols = [str(x).strip() for x in raw if str(x).strip()]
+            else:
+                symbols = []
+            self._json(gp.validate_symbols(symbols, crypto_ok=sc.crypto_symbol_is_listed,
+                                           gate_ok=sc.gate_contract_is_listed))
+        elif p == "/api/global_pool/override":
+            body = self._body()
+            action = str(body.get("action") or "").lower()
+            if action == "clear":
+                gp.clear_override_symbols()
+                log("覆盖池已清空，将使用默认混合池")
+                self._json({"ok": True, "saved": [], "rejected": [], **override_payload()})
+                return
+            raw = body.get("symbols")
+            if isinstance(raw, str):
+                symbols = gp.parse_symbol_text(raw)
+            elif isinstance(raw, list):
+                symbols = [str(x).strip() for x in raw if str(x).strip()]
+            else:
+                symbols = []
+            result = gp.validate_symbols(symbols, crypto_ok=sc.crypto_symbol_is_listed,
+                                         gate_ok=sc.gate_contract_is_listed)
+            ok_codes = [x["code"] for x in result["ok"]]
+            gp.save_override_symbols(ok_codes)
+            log("覆盖池已保存 %s 只%s" % (
+                len(ok_codes),
+                f"，拒绝 {len(result['bad'])}" if result["bad"] else "",
+            ))
+            self._json({
+                "ok": True,
+                "saved": result["ok"],
+                "rejected": result["bad"],
+                **override_payload(),
+            })
         else:
             self._json({"error": "not found"}, 404)
 
