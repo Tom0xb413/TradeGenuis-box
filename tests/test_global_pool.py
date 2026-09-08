@@ -160,8 +160,9 @@ class PoolBuilderTest(unittest.TestCase):
         self.assertIn("7203.T", {x["code"] for x in by["jp_stock"]})
         self.assertIn("005930", {x["code"] for x in by["kr_stock"]})
         self.assertTrue(all(x["source"] != "yahoo" for x in pool if x["asset_class"] != "crypto"))
-        self.assertEqual(gp.gate_contract_for("AAPL"), "AAPLX_USDT")
-        self.assertEqual(gp.gate_venue_for_pair("AAPLX_USDT"), "spot")
+        self.assertEqual(gp.gate_contract_for("AAPL"), "AAPL_USDT")
+        self.assertEqual(gp.gate_venue_for_pair("AAPL_USDT"), "futures")
+        self.assertEqual(gp.gate_spot_fallback_for("AAPL"), "AAPLX_USDT")
         self.assertEqual(gp.gate_contract_for(".INX"), "SPX500_USDT")
         self.assertEqual(gp.gate_contract_for(".DJI"), "US30_USDT")
         self.assertEqual(gp.gate_contract_for(".NDX"), "NAS100_USDT")
@@ -175,10 +176,12 @@ class PoolBuilderTest(unittest.TestCase):
         aapl = next(x for x in by["us_stock"] if x["code"] == "AAPL")
         self.assertTrue(aapl.get("tokenized"))
         self.assertEqual(aapl["source"], "gate")
-        self.assertEqual(aapl["gate_contract"], "AAPLX_USDT")
+        self.assertEqual(aapl["gate_contract"], "AAPL_USDT")
         ma = next(x for x in by["us_stock"] if x["code"] == "MA")
         self.assertTrue(ma.get("tokenized"))
         self.assertEqual(ma["gate_contract"], "MAX_USDT")
+        sony = next(x for x in by["jp_stock"] if x["code"] == "6758.T")
+        self.assertEqual(sony["token_role"], "proxy")
         nky = next(x for x in by["jp_index"] if x["code"] == "NKY")
         self.assertEqual(nky["source"], "sina")
         toyota = next(x for x in by["jp_stock"] if x["code"] == "7203.T")
@@ -240,12 +243,12 @@ class PoolBuilderTest(unittest.TestCase):
         self.assertEqual(gp.resolve_symbol("AAPL_USDT")["code"], "AAPL")
         self.assertEqual(gp.resolve_symbol("AAPLUSDT")["code"], "AAPL")
         self.assertTrue(gp.resolve_symbol("AAPL")["tokenized"])
-        self.assertEqual(gp.resolve_symbol("AAPL")["gate_contract"], "AAPLX_USDT")
+        self.assertEqual(gp.resolve_symbol("AAPL")["gate_contract"], "AAPL_USDT")
         self.assertEqual(gp.resolve_symbol("AAPLX_USDT")["code"], "AAPL")
         self.assertEqual(gp.resolve_symbol("AAPLX")["code"], "AAPL")
         self.assertEqual(gp.resolve_symbol("AAPL_USDT")["code"], "AAPL")
         self.assertEqual(gp.resolve_symbol("MAX_USDT")["code"], "MA")
-        self.assertEqual(gp.gate_venue_for_pair(gp.resolve_symbol("AAPL")["gate_contract"]), "spot")
+        self.assertEqual(gp.gate_venue_for_pair(gp.resolve_symbol("AAPL")["gate_contract"]), "futures")
         self.assertEqual(gp.resolve_symbol("TM")["code"], "TM")
         self.assertEqual(gp.resolve_symbol("TM")["name"], "丰田ADR")
         self.assertEqual(gp.resolve_symbol("TM")["gate_contract"], "TM_USDT")
@@ -253,7 +256,7 @@ class PoolBuilderTest(unittest.TestCase):
         self.assertEqual(gp.resolve_symbol("SAMSUNG")["code"], "005930")
         self.assertEqual(gp.resolve_symbol("SPX500")["code"], ".INX")
         self.assertEqual(gp.resolve_symbol("NAS100")["code"], ".NDX")
-        self.assertEqual(gp.resolve_symbol("QQQ")["gate_contract"], "QQQX_USDT")
+        self.assertEqual(gp.resolve_symbol("QQQ")["gate_contract"], "QQQ_USDT")
         self.assertEqual(gp.resolve_symbol("PLTR")["gate_contract"], "PLTR_USDT")
         self.assertEqual(gp.resolve_symbol("PLTR_USDT")["code"], "PLTR")
         self.assertIsNone(gp.guess_us_gate_contract("DIA"))
@@ -285,7 +288,8 @@ class ResolveGoldTest(unittest.TestCase):
                 return []
             return _daily_bars(8)
 
-        with patch.object(sc, "fetch_crypto_kline", side_effect=fake_kline):
+        with patch.object(sc, "fetch_crypto_kline", side_effect=fake_kline), \
+             patch.object(sc, "fetch_gate_equity_klines", return_value=[]):
             g = sc.resolve_gold_instrument([])
         self.assertEqual(g["code"], "XAUTUSDT")
         self.assertEqual(g["source"], "crypto")
@@ -553,6 +557,8 @@ class DashboardGlobalPoolContractTest(unittest.TestCase):
         self.assertIn("覆盖池已变更", self.html)
         self.assertIn("股票代币", self.html)
         self.assertIn("美股代币", self.html)
+        self.assertIn("代币代理", self.html)
+        self.assertIn("日股代理", self.html)
         self.assertIn("新浪分钟K", self.html)
 
 
@@ -682,13 +688,13 @@ class GateTokenPathTest(unittest.TestCase):
              patch.object(sc, "fetch_crypto_kline",
                           side_effect=AssertionError("股票代币不得走 Binance 粘性路径")):
             inst = sc.fetch_global_instrument("AAPL", interval="4h")
-        self.assertEqual(calls[0][0], "AAPLX_USDT")
+        self.assertEqual(calls[0][0], "AAPL_USDT")
         self.assertEqual(calls[0][1], "4h")
-        self.assertEqual(calls[0][2], "spot")
+        self.assertEqual(calls[0][2], "futures")
         self.assertTrue(inst["tokenized"])
         self.assertEqual(inst["source"], "gate")
-        self.assertEqual(inst["gate_contract"], "AAPLX_USDT")
-        self.assertEqual(inst["gate_venue"], "spot")
+        self.assertEqual(inst["gate_contract"], "AAPL_USDT")
+        self.assertEqual(inst["gate_venue"], "futures")
         self.assertIsNone(inst.get("interval_note"))
         self.assertFalse(inst.get("interval_limited"))
 
@@ -721,7 +727,7 @@ class GateTokenPathTest(unittest.TestCase):
         self.assertTrue(row["ok"])
         self.assertEqual(row["code"], "AAPL")
         self.assertEqual(row["source"], "gate")
-        self.assertEqual(row["gate_contract"], "AAPLX_USDT")
+        self.assertEqual(row["gate_contract"], "AAPL_USDT")
 
     def test_gate_equity_excluded_from_crypto_topn(self):
         tickers = [{"symbol": "AAPLUSDT", "price": 1, "chg": 99}] + _tickers(20)
@@ -741,6 +747,20 @@ class GateTokenPathTest(unittest.TestCase):
         crypto = [x for x in pool if x["asset_class"] == "crypto"]
         self.assertFalse(any(x["code"] in ("AAPLXUSDT", "AAPL3LUSDT") for x in crypto))
         self.assertEqual(len(crypto), 20)
+
+    def test_aapl_spot_fallback_when_futures_empty(self):
+        def fake_gate(contract, limit=200, interval="1d", venue=None):
+            if venue == "futures" or contract == "AAPL_USDT":
+                return []
+            return _daily_bars(50)
+
+        with patch.object(sc, "fetch_gate_equity_klines", side_effect=fake_gate), \
+             patch.object(sc, "fetch_crypto_kline",
+                          side_effect=AssertionError("no binance")):
+            inst = sc.fetch_global_instrument("AAPL", interval="4h")
+        self.assertEqual(inst["gate_contract"], "AAPLX_USDT")
+        self.assertEqual(inst["gate_venue"], "spot")
+        self.assertTrue(inst["tokenized"])
 
     def test_ma_uses_max_spot_token(self):
         with patch.object(sc, "fetch_gate_equity_klines",

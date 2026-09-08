@@ -74,9 +74,11 @@ from global_pool import (
     DEFAULT_CRYPTO_INTERVAL,
     GOLD_CRYPTO_SYMBOLS,
     GOLD_DISPLAY_NAME,
+    GOLD_SPOT_PAIR,
     build_global_pool,
     format_bar_date,
     gate_contract_for,
+    gate_spot_fallback_for,
     gate_venue_for_pair,
     guess_us_gate_contract,
     is_crypto_perp_symbol,
@@ -1840,10 +1842,21 @@ def fetch_global_instrument(code: str, interval: str | None = None,
 
     if cls in ("crypto", "gold") or src_hint == "crypto" or (
             not ident and is_crypto_perp_symbol(code)):
-        try:
-            bars = fetch_crypto_kline(canon, limit=lookback, interval=iv)
-        except Exception:
-            bars = []
+        bars = []
+        gold_src = "crypto"
+        if cls == "gold":
+            try:
+                bars = fetch_gate_equity_klines(
+                    GOLD_SPOT_PAIR, limit=lookback, interval=iv, venue="spot")
+            except Exception:
+                bars = []
+            if bars:
+                gold_src = "gate"
+        if not bars:
+            try:
+                bars = fetch_crypto_kline(canon, limit=lookback, interval=iv)
+            except Exception:
+                bars = []
         if not bars:
             return None
         px = bars[-1]["close"]
@@ -1853,7 +1866,7 @@ def fetch_global_instrument(code: str, interval: str | None = None,
         name = GOLD_DISPLAY_NAME if cls == "gold" else ((ident or {}).get("name") or canon)
         return {
             "code": canon, "name": name, "price": px, "chg": chg,
-            "bars": bars, "source": "crypto",
+            "bars": bars, "source": gold_src if cls == "gold" else "crypto",
             "asset_class": cls or "crypto",
             "interval": iv, "interval_note": None, "interval_limited": False,
             "tokenized": False,
@@ -1880,7 +1893,16 @@ def fetch_global_instrument(code: str, interval: str | None = None,
             bars = fetch_gate_equity_klines(contract, limit=lookback, interval=iv, venue=venue)
         except Exception:
             bars = []
-        if not bars and venue == "spot":
+        if not bars and venue != "spot":
+            spot = gate_spot_fallback_for(canon)
+            if spot:
+                try:
+                    bars = fetch_gate_equity_klines(spot, limit=lookback, interval=iv, venue="spot")
+                except Exception:
+                    bars = []
+                if bars:
+                    contract, venue = spot, "spot"
+        elif not bars and venue == "spot":
             fb = guess_us_gate_contract(canon) if cls == "us_stock" else None
             if fb and fb != contract and fb in listed_gate_contracts():
                 try:
@@ -1894,7 +1916,10 @@ def fetch_global_instrument(code: str, interval: str | None = None,
             chg = None
             if len(bars) >= 2 and bars[-2]["close"]:
                 chg = (bars[-1]["close"] - bars[-2]["close"]) / bars[-2]["close"] * 100.0
-            return {
+            role = ident.get("token_role")
+            if not role and cls in ("jp_stock", "kr_stock", "jp_index", "kr_index"):
+                role = "proxy"
+            out = {
                 "code": canon,
                 "name": ident.get("name") or canon,
                 "price": px, "chg": chg,
@@ -1906,6 +1931,9 @@ def fetch_global_instrument(code: str, interval: str | None = None,
                 "gate_venue": venue,
                 "market": "crypto",
             }
+            if role:
+                out["token_role"] = role
+            return out
 
     try:
         from equity_sources import fetch_equity_instrument
@@ -1926,7 +1954,7 @@ def fetch_tab_kline(code: str, interval: str | None = None,
 def resolve_gold_instrument(tickers: list[dict] | None = None,
                             interval: str = "1d") -> dict | None:
     """
-    选 1 只黄金：优先 Gate XAUT_USDT（ticker 或 K 线），再 XAUUSDT / PAXGUSDT。
+    选 1 只黄金：优先 Gate XAUT_USDT 现货（及 ticker/永续），再 XAUUSDT / PAXGUSDT。
     全部失败返回 None（扫描跳过黄金，不中止）。不再把 Yahoo 当主路径。
     """
     ticker_map = {}
@@ -1942,6 +1970,19 @@ def resolve_gold_instrument(tickers: list[dict] | None = None,
                 "price": t.get("price"), "chg": t.get("chg"),
                 "asset_class": "gold", "market": "crypto", "source": "crypto",
             }
+    try:
+        bars = fetch_gate_equity_klines(GOLD_SPOT_PAIR, limit=8, interval="1d", venue="spot")
+        if len(bars) >= 2:
+            px = bars[-1]["close"]
+            prev = bars[-2]["close"]
+            chg = ((px - prev) / prev * 100.0) if prev else 0.0
+            return {
+                "code": GOLD_CRYPTO_SYMBOLS[0], "name": GOLD_DISPLAY_NAME,
+                "price": px, "chg": chg,
+                "asset_class": "gold", "market": "crypto", "source": "gate",
+            }
+    except Exception:
+        pass
     for sym in GOLD_CRYPTO_SYMBOLS:
         try:
             bars = fetch_crypto_kline(sym, limit=8, interval="1d")
@@ -1964,7 +2005,8 @@ def analyze_crypto(sym: str, price: float, chg: float,
                    bars: list[dict], box_mode: str | None = None,
                    *, name: str | None = None, asset_class: str = "crypto",
                    source: str = "crypto", tokenized: bool = False,
-                   gate_contract: str | None = None) -> dict | None:
+                   gate_contract: str | None = None,
+                   token_role: str | None = None) -> dict | None:
     """复用同一套箱体/倍量/试盘引擎。market 仍为 crypto（看板 Tab）；asset_class 区分币/金/指数/美股。"""
     if len(bars) < 40:
         return None
@@ -1991,6 +2033,8 @@ def analyze_crypto(sym: str, price: float, chg: float,
     }
     if gate_contract:
         row["gate_contract"] = gate_contract
+    if token_role:
+        row["token_role"] = token_role
     return score_row(row)
 
 
@@ -2065,6 +2109,7 @@ def run_crypto_scan(top: int = CRYPTO_TOP_N, workers: int | None = None,
                 source=inst.get("source") or item.get("source") or "equity",
                 tokenized=bool(inst.get("tokenized") or item.get("tokenized")),
                 gate_contract=inst.get("gate_contract") or item.get("gate_contract"),
+                token_role=inst.get("token_role") or item.get("token_role"),
             )
             if row is None:
                 with lock:

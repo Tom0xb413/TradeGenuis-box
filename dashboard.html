@@ -341,8 +341,8 @@
 <div class="modal-bg" id="coverModal" hidden>
   <div class="modal" role="dialog" aria-labelledby="coverModalTitle">
     <h4 id="coverModalTitle">覆盖标的池</h4>
-    <p class="hint">逗号或换行分隔。非空时扫描<b>只扫这些标的</b>；清空则恢复默认混合池（币 TOP20 + 黄金 + 美/日/韩指数与龙头）。美股等优先校验 Gate <b>股票代币</b>（现货 xStock 如 AAPLX_USDT，或永续 AAPL_USDT；跟踪正股但有基差，非交易所官方打印）；无代币的美股可用新浪分钟K，日韩正股再走 Naver/Sina 日K。</p>
-    <textarea id="coverSymbols" placeholder="AAPL, AAPLX_USDT, PLTR, .INX, 7203.T, TM, 005930, BTCUSDT, 黄金"></textarea>
+    <p class="hint">逗号或换行分隔。非空时扫描<b>只扫这些标的</b>；清空则恢复默认混合池（币 TOP20 + 黄金 + 美/日/韩指数与龙头）。美股等优先校验 Gate <b>USDT 永续干净名</b>（AAPL_USDT，跟踪正股但有基差，非交易所官方打印）；现货 *X 仅回退。日韩 Gate 标的为<b>代币代理</b>。</p>
+    <textarea id="coverSymbols" placeholder="AAPL, AAPL_USDT, PLTR, .INX, 7203.T, TM, 005930, BTCUSDT, 黄金"></textarea>
     <div class="modal-err" id="coverErr"></div>
     <div class="modal-actions">
       <button class="act ghost" type="button" id="btnCoverClear">清空（用默认）</button>
@@ -450,8 +450,8 @@ function assetBadgeHTML(r) {
   const lab = {
     crypto: "币", gold: "金",
     us_index: tok ? "美指代币" : "美指", us_stock: tok ? "美股代币" : "美股",
-    jp_index: tok ? "日指代币" : "日指", jp_stock: tok ? "日股代币" : "日股",
-    kr_index: tok ? "韩指代币" : "韩指", kr_stock: tok ? "韩股代币" : "韩股",
+    jp_index: tok ? "日指代理" : "日指", jp_stock: tok ? "日股代理" : "日股",
+    kr_index: tok ? "韩指代理" : "韩指", kr_stock: tok ? "韩股代理" : "韩股",
   }[cls];
   if (!lab) return "";
   return `<span class="asset-badge ${cls}${tok ? " tokenized" : ""}">${lab}</span>`;
@@ -852,8 +852,9 @@ function cardHTML(r, i) {
     : (isCrypto && r.qualified);
   const aBadge = isCrypto ? assetBadgeHTML(r) : "";
   const ivNote = (isCrypto && r.interval_note) ? `<span class="interval-note">${r.interval_note}</span>` : "";
+  const tokLab = (r.token_role === "proxy") ? "代币代理" : "股票代币";
   const tokNote = (isCrypto && r.tokenized && !r.interval_note)
-    ? `<span class="token-note" title="Gate 股票代币，跟踪正股但可能有基差，非交易所官方行情">股票代币</span>` : "";
+    ? `<span class="token-note" title="Gate 代币化市场，跟踪正股但可能有基差，非交易所官方行情">${tokLab}</span>` : "";
   const cd = r.gate_contract ? `${r.code} · ${r.gate_contract}` : r.code;
   return `<article class="sig${hiLite ? ' q' : ''}" data-code="${r.code}" data-market="${S.market}" data-qualified="${r.qualified ? 1 : 0}" style="animation-delay:${Math.min(i * 50, 400)}ms">
     <div class="sig-top">

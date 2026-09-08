@@ -4,35 +4,33 @@
 
 常量集中在 [`global_pool.py`](../global_pool.py)（含 `GATE_EQUITY_MAP`），无代币时的日K / 美股分钟K 在 [`equity_sources.py`](../equity_sources.py)。
 
-## 股票代币（重要）
+## 股票代币 / 代币代理（重要）
 
-美/日/韩 **有 Gate 代币** 的标的，主路径走 **股票代币**（看板徽章「美股代币」等）。这与币圈一样有原生 **4h / 8h / 1d**，国内 VPS 可直连。
+美/日/韩 **有 Gate 市场** 的标的走 **代币化加密市场**（原生 **4h / 8h / 1d**，VPS 可直连）。**不是**纽交所 / 东证 / 韩交所官方打印，跟踪正股但存在基差。
 
-优先级：
+优先级（VPS 表）：
 
-1. **现货 xStock `*X`**（`AAPLX_USDT`、`TSLAX_USDT`、`SPYX_USDT`…）—— VPS 实测多日 1h/4h/8h。不用 `3L`/`3S`，也不用 `*G`/`*ON` 当默认。
-2. 没有合格 `*X` 时用 **USDT 永续干净名**（`MSFT_USDT`、`SPX500_USDT`、`SONY_USDT`）。
-3. 仍无代币：美股/美指走新浪 `getMinK`；日韩正股走日K。
+1. **USDT 永续干净名**（`AAPL_USDT`、`SPX500_USDT`、`SONY_USDT`）
+2. 失败再试现货 `*X` / `*G` / `*ON`（如 `AAPLX_USDT`）。**不用** `3L`/`3S`
+3. 仍无：美股/美指新浪 `getMinK`；日韩正股日K
 
-代币**跟踪正股但存在基差**，**不是**纽交所、东证、韩交所的官方打印。真·日韩 1h 分钟线在 VPS 上仍弱，需要 VPN/Yahoo 时请自行处理，主路径不依赖 Yahoo。
+日韩 Gate 标的（索尼、三星）看板标 **代币代理**；美股/美指标 **股票代币**。
 
-映射表见 `GATE_EQUITY_MAP`（2026-09 VPS + 本环境实测）：
-
-| 内部代码 | Gate 交易对 | 通道 | 说明 |
+| 内部代码 | 主路径（永续） | 现货回退 | 说明 |
 |---|---|---|---|
-| AAPL NVDA GOOGL AMZN META TSLA UNH PG HD AVGO NFLX | `{TICKER}X_USDT`（NFLX 为 `NFLXX_USDT`） | 现货 | xStock |
-| MSFT JPM V XOM JNJ WMT COST BRK-B | `{TICKER}_USDT` / `BRKB_USDT` | 永续 | 无合格 *X（`WMTX` 报价约 0.03 不是沃尔玛） |
-| `MA` | `MAX_USDT` | 现货 | Mastercard xStock。永续无 MA；现货 `MA_USDT` 是 Mind AI |
-| `.INX` | `SPX500_USDT` | 永续 | **不要**用 `SPX_USDT`。ETF 另见 `SPYX_USDT` |
-| `.DJI` | `US30_USDT` | 永续 | **不要**用 `DIA_USDT` |
-| `.NDX` | `NAS100_USDT` | 永续 | ETF 另见 `QQQX_USDT` |
-| `.IXIC` | （无） | | 纳指综合：新浪分钟K / 日K |
-| `7203.T` | （无） | | 日元丰田，Naver 日K。覆盖池 `TM` 才是 ADR 代币 |
-| `6758.T` | `SONY_USDT` | 永续 | |
-| `005930` / `000660` | `SAMSUNG_USDT` / `SKHYNIX_USDT` | 永续 | |
-| `NKY` / KOSPI / KOSDAQ | （无） | | 日K。`JPN225_USDT` 标尺不对 |
+| US20 除 MA | `{TICKER}_USDT`，伯克希尔 `BRKB_USDT` | 有核对过的 `*X`/`*G` | `WMTX` 不是沃尔玛 |
+| `MA` | （无） | `MAX_USDT` | 永续无 MA；现货 `MA_USDT` 是 Mind AI |
+| `.INX` | `SPX500_USDT` | — | **不要** `SPX_USDT`（梗币） |
+| `.DJI` | `US30_USDT` | — | **不要** `DIA_USDT`（加密 DIA） |
+| `.NDX` | `NAS100_USDT` | — | |
+| `.IXIC` | （无） | | 新浪分钟K |
+| `SPY`/`QQQ`/`IWM`/`SQQQ` | 对应 `_USDT` 永续 | `SPYX`/`QQQX` | 覆盖池 ETF |
+| `7203.T` | （无） | | 日元丰田日K。无 TOYOTA 代币 |
+| `6758.T` | `SONY_USDT` | | **代币代理** |
+| `005930`/`000660` | `SAMSUNG_USDT` / `SKHYNIX_USDT` | | **代币代理** |
+| `NKY`/KOSPI/KOSDAQ | （无） | | 日K。勿用 `JPN225_USDT` |
 
-覆盖池额外：`SPY`/`QQQ`→现货 `SPYX`/`QQQX`；`COIN`/`HOOD`/`MSTR`→对应 *X；其余 `PLTR`/`IBM`/`ORCL`/`TM` 等走永续。
+覆盖池额外永续：`COIN` `BABA` `AMD` `ARM` `PLTR` `HOOD` `MSTR` `IBM` `ORCL` `TM`。`AAPL` 与 `AAPL_USDT` 都解析到 Gate。
 
 无对应代币时：
 
@@ -44,9 +42,9 @@
 | 类别 | `asset_class` | 数量 | 主源 |
 |---|---|---|---|
 | USDT 永续涨幅榜 | `crypto` | `CRYPTO_TOP_N = 20` | Binance `fapi` 24h ticker，失败后**粘性** Gate.io；股票代币 / xStock / 杠杆合约不占 TOP20 |
-| 黄金（1 只） | `gold` | 1 | Gate **`XAUT_USDT`**（不要用 `XAU_USDT` 当首选）→ `XAUUSDT` / `PAXGUSDT` |
+| 黄金（1 只） | `gold` | 1 | Gate **`XAUT_USDT` 现货**（及永续；不要用 `XAU_USDT` 当首选）→ `XAUUSDT` / `PAXGUSDT` |
 | 美股指数 | `us_index` | 4 | Gate 代币（标普/道指/纳指100）或新浪分钟K/日K（纳指综合） |
-| 美股大盘 | `us_stock` | `US_STOCKS` 约 20 | 有 *X 走现货 xStock；否则永续干净名；再无则新浪 getMinK / 日K |
+| 美股大盘 | `us_stock` | `US_STOCKS` 约 20 | 永续干净名；失败再现货 *X；再无则新浪 getMinK |
 | 日经 225 | `jp_index` | 1 | 新浪 `gi.finance.sina.com.cn/hq/daily?symbol=NKY` |
 | 日股龙头 | `jp_stock` | 2 | 索尼走 Gate `SONY_USDT`；丰田 `7203.T` 走 Naver 日K |
 | KOSPI / KOSDAQ | `kr_index` | 2 | Naver `siseJson.nhn` |
@@ -69,7 +67,7 @@
 
 优先级（成功即停，失败则降级，整轮扫描不中止）：
 
-1. **Gate `XAUT_USDT`**（内部代码 `XAUTUSDT`，Tether Gold）
+1. **Gate `XAUT_USDT` 现货**（及永续 ticker / K 线）
 2. 交易所黄金永续 `XAUUSDT` / `PAXGUSDT`
 
 展示名固定为「黄金」。`crypto.json` 的 `gold` 字段记录实际 `code` 与 `source`。
@@ -83,7 +81,7 @@
 | `4h` / `8h` | 原生周期 | 新浪 `getMinK` | **无稳定多日分钟历史** → 回退 **日K**，并带 `interval_note` |
 | `1d` | 日K | 日K | 日K（新浪 / Naver） |
 
-股票代币 K 线**不**走 Binance。`fetch_gate_equity_klines` 按 `gate_venue` 打现货或永续。现货失败再试永续干净名；未上市才回退新浪。日韩真·1h 需 VPN/Yahoo，主路径不接。
+股票代币 K 线**不**走 Binance。主路径永续干净名，失败再现货 `*X`/`*G`。未上市才回退新浪。日韩真·1h 需 VPN/Yahoo。
 
 ## 覆盖池
 
@@ -92,7 +90,7 @@
 - 持久化：`data/global_override_pool.json`（`{"symbols":[...]}`）
 - **非空**：扫描**只扫这些标的**（仍应用周期与形态）
 - **空**：默认混合池
-- 校验：Gate 股票代币或别名（`AAPL` / `AAPLX_USDT` / `AAPL_USDT` / `MAX` / `PLTR` / `TM` / `SAMSUNG`）→ 现货/永续 / 黄金 / Sina / Naver
+- 校验：`AAPL` / `AAPL_USDT` / `AAPLX` / `PLTR` / `SAMSUNG` → Gate 市场 / 黄金 / Sina / Naver
 - 无效代码不写入；接口返回 `rejected: [{code, reason}]`
 - 药丸显示：覆盖时「N 只」，否则「默认」
 
