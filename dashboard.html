@@ -808,10 +808,8 @@ async function loadChart(code, market) {
     boxEl.textContent = boxLineText({ ...d.box, box_mode: d.box_mode || d.box.box_mode || "classic" });
   }
   const host = card && card.querySelector("[data-edge-host]");
-  if (host && fam === "high_flag" && d.flag) {
+  if (host && (fam === "high_flag" || fam === "trendline")) {
     host.innerHTML = "";
-  } else if (host && fam === "trendline" && d.trendline) {
-    host.innerHTML = tlBadgeHTML(d.trendline.tl_event);
   } else if (host && d.box) host.innerHTML = edgeBadgeHTML(d.box.edge_event);
 }
 function observeCardCharts() {
@@ -840,6 +838,7 @@ function strokeTl(ctx, bars, points, y, col, padL, step) {
   const seq = (points || []).filter(p => p && p.date in idx && p.price != null);
   if (seq.length < 2) return;
   ctx.save();
+  ctx.lineWidth = 1.6;
   ctx.setLineDash([5, 4]);
   ctx.strokeStyle = col;
   ctx.beginPath();
@@ -910,17 +909,6 @@ function drawChart(cv, d) {
       ctx.fillRect(px - Math.max(2, bw), padT, Math.max(4, bw * 2), vh);
     }
   } else if (family === "trendline") {
-    const pts = tln.tl_points || {};
-    strokeTl(ctx, bars, pts.support, y, "#8FC98B", padL, step);
-    strokeTl(ctx, bars, pts.resistance, y, "#F07A63", padL, step);
-    if (tln.tl_support && tln.tl_support.L_now != null) {
-      ctx.fillStyle = "#8FC98B";
-      ctx.fillText("支撑 " + priceFmt(Number(tln.tl_support.L_now)), padL + 2, Math.min(padT + vh - 2, y(Number(tln.tl_support.L_now)) + 12));
-    }
-    if (tln.tl_resistance && tln.tl_resistance.L_now != null) {
-      ctx.fillStyle = "#F07A63";
-      ctx.fillText("压力 " + priceFmt(Number(tln.tl_resistance.L_now)), padL + 2, Math.max(padT + 10, y(Number(tln.tl_resistance.L_now)) - 4));
-    }
     if (tln.tl_event_bar) {
       const bi = bars.findIndex(b => b.date === tln.tl_event_bar);
       if (bi >= 0) {
@@ -971,6 +959,20 @@ function drawChart(cv, d) {
     const vy = vh + 10 + (1 - b.vol / vmax) * volH;
     ctx.globalAlpha = 0.35; ctx.fillRect(x0, vy, Math.max(1, x1 - x0), Math.max(1, vh + 10 + volH - vy)); ctx.globalAlpha = 1;
   });
+  if (family === "trendline") {
+    const pts = tln.tl_points || {};
+    strokeTl(ctx, bars, pts.support, y, "#8FC98B", padL, step);
+    strokeTl(ctx, bars, pts.resistance, y, "#F07A63", padL, step);
+    ctx.textAlign = "left";
+    if (tln.tl_support && tln.tl_support.L_now != null) {
+      ctx.fillStyle = "#8FC98B";
+      ctx.fillText("支撑 " + priceFmt(Number(tln.tl_support.L_now)), padL + 2, Math.min(padT + vh - 2, y(Number(tln.tl_support.L_now)) + 12));
+    }
+    if (tln.tl_resistance && tln.tl_resistance.L_now != null) {
+      ctx.fillStyle = "#F07A63";
+      ctx.fillText("压力 " + priceFmt(Number(tln.tl_resistance.L_now)), padL + 2, Math.max(padT + 10, y(Number(tln.tl_resistance.L_now)) - 4));
+    }
+  }
   ctx.fillStyle = "rgba(229,212,182,.4)"; ctx.textAlign = "right";
   ctx.fillText((vmax / 10000).toFixed(0) + "万手", W - padR, vh + 20);
   ctx.strokeStyle = "rgba(229,212,182,.07)"; ctx.beginPath(); ctx.moveTo(padL, vh + 10); ctx.lineTo(W - padR, vh + 10); ctx.stroke();
