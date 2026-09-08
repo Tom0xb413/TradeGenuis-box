@@ -341,8 +341,8 @@
 <div class="modal-bg" id="coverModal" hidden>
   <div class="modal" role="dialog" aria-labelledby="coverModalTitle">
     <h4 id="coverModalTitle">覆盖标的池</h4>
-    <p class="hint">逗号或换行分隔。非空时扫描<b>只扫这些标的</b>；清空则恢复默认混合池（币 TOP20 + 黄金 + 美/日/韩指数与龙头）。美股等优先校验 Gate <b>股票代币</b>（如 AAPL_USDT，跟踪正股但有基差，非交易所官方打印）；无代币的美股可用新浪分钟K，日韩正股再走 Naver/Sina 日K。</p>
-    <textarea id="coverSymbols" placeholder="AAPL, AAPL_USDT, PLTR, .INX, 7203.T, TM, 005930, BTCUSDT, 黄金"></textarea>
+    <p class="hint">逗号或换行分隔。非空时扫描<b>只扫这些标的</b>；清空则恢复默认混合池（币 TOP20 + 黄金 + 美/日/韩指数与龙头）。美股等优先校验 Gate <b>股票代币</b>（现货 xStock 如 AAPLX_USDT，或永续 AAPL_USDT；跟踪正股但有基差，非交易所官方打印）；无代币的美股可用新浪分钟K，日韩正股再走 Naver/Sina 日K。</p>
+    <textarea id="coverSymbols" placeholder="AAPL, AAPLX_USDT, PLTR, .INX, 7203.T, TM, 005930, BTCUSDT, 黄金"></textarea>
     <div class="modal-err" id="coverErr"></div>
     <div class="modal-actions">
       <button class="act ghost" type="button" id="btnCoverClear">清空（用默认）</button>

@@ -77,6 +77,7 @@ from global_pool import (
     build_global_pool,
     format_bar_date,
     gate_contract_for,
+    gate_venue_for_pair,
     guess_us_gate_contract,
     is_crypto_perp_symbol,
     load_override_symbols,
@@ -1511,6 +1512,7 @@ def run_market_scan(full: bool = True, top: int = MARKET_TOP,
 CRYPTO_FILE = DATA / "crypto.json"
 BINANCE_FUTURES = "https://fapi.binance.com"
 GATE_FUTURES = "https://api.gateio.ws/api/v4/futures/usdt"
+GATE_SPOT = "https://api.gateio.ws/api/v4/spot"
 _crypto_backend = "binance"  # 本轮扫描内粘性：Binance 一旦失败则整轮改走 Gate
 
 
@@ -1647,11 +1649,11 @@ def _gate_klines(symbol: str, limit: int, interval: str) -> list[dict]:
 
 
 def fetch_gate_equity_klines(contract: str, limit: int = CRYPTO_LOOKBACK,
-                             interval: str = "1d") -> list[dict]:
+                             interval: str = "1d", venue: str | None = None) -> list[dict]:
     """
-    直接拉 Gate USDT 永续 K 线，不经过 Binance、不改粘性后端。
-    股票代币必须走这条路径，避免 AAPL 打 Binance 失败后把整轮扫进 Gate。
-    contract 形如 AAPL_USDT / SPX500_USDT。
+    拉 Gate 股票代币 K 线：xStock 走现货，其余走 USDT 永续。
+    不经过 Binance、不改粘性后端。
+    contract 形如 AAPLX_USDT / AAPL_USDT / SPX500_USDT。
     """
     iv = normalize_crypto_interval(interval)
     name = (contract or "").strip()
@@ -1659,11 +1661,45 @@ def fetch_gate_equity_klines(contract: str, limit: int = CRYPTO_LOOKBACK,
         return []
     if "_" not in name and name.upper().endswith("USDT") and len(name) > 4:
         name = gate_contract(name)
+    kind = venue or gate_venue_for_pair(name)
+    if kind == "spot":
+        d = http_json(
+            f"{GATE_SPOT}/candlesticks?currency_pair={name}"
+            f"&interval={iv}&limit={limit}",
+            timeout=15,
+        )
+        return _bars_from_gate_spot(d, iv)
     d = http_json(
         f"{GATE_FUTURES}/candlesticks?contract={name}"
         f"&interval={iv}&limit={limit}",
         timeout=15,
     )
+    return _bars_from_gate_futures(d, iv)
+
+
+def _bars_from_gate_spot(d, iv: str) -> list[dict]:
+    """现货 candlesticks：[t, quote_vol, close, high, low, open, base_vol, ...]。"""
+    bars = []
+    for k in d or []:
+        try:
+            if isinstance(k, dict):
+                ts, o, h, low, c = k.get("t"), k.get("o"), k.get("h"), k.get("l"), k.get("c")
+                v = k.get("v") or k.get("base_volume") or 0
+            else:
+                ts, o, h, low, c, v = k[0], k[5], k[3], k[4], k[2], k[6] if len(k) > 6 else 0
+            bars.append({
+                "date": format_bar_date(float(ts), iv),
+                "open": float(o), "close": float(c),
+                "high": float(h), "low": float(low),
+                "vol": float(v or 0),
+            })
+        except (ValueError, IndexError, TypeError, AttributeError, KeyError):
+            continue
+    bars.sort(key=lambda b: b["date"])
+    return bars
+
+
+def _bars_from_gate_futures(d, iv: str) -> list[dict]:
     bars = []
     for k in d or []:
         try:
@@ -1686,6 +1722,7 @@ def fetch_gate_equity_klines(contract: str, limit: int = CRYPTO_LOOKBACK,
 
 
 _gate_contract_cache: dict = {"ts": 0.0, "names": set()}
+_gate_spot_cache: dict = {"ts": 0.0, "names": set()}
 
 
 def listed_gate_contracts(ttl: float = 600.0) -> set[str]:
@@ -1709,17 +1746,39 @@ def listed_gate_contracts(ttl: float = 600.0) -> set[str]:
     return set(_gate_contract_cache["names"] or [])
 
 
+def listed_gate_spot_pairs(ttl: float = 600.0) -> set[str]:
+    """Gate 现货交易对（AAPLX_USDT）。失败返回上次成功结果。"""
+    now = time.time()
+    if _gate_spot_cache["names"] and now - _gate_spot_cache["ts"] < ttl:
+        return set(_gate_spot_cache["names"])
+    try:
+        rows = http_json(f"{GATE_SPOT}/currency_pairs", timeout=15)
+        names = set()
+        for c in rows or []:
+            n = str((c or {}).get("id") or "").strip()
+            if n:
+                names.add(n)
+        if names:
+            _gate_spot_cache["ts"] = now
+            _gate_spot_cache["names"] = names
+            return set(names)
+    except Exception:
+        pass
+    return set(_gate_spot_cache["names"] or [])
+
+
 def gate_contract_is_listed(contract: str) -> bool:
-    """覆盖池：合约在 Gate 永续列表中，或能拉到至少 1 根 K。"""
+    """覆盖池：合约在 Gate 永续或现货列表中，或能拉到至少 1 根 K。"""
     name = (contract or "").strip()
     if not name:
         return False
     if "_" not in name and name.upper().endswith("USDT"):
         name = gate_contract(name)
-    if name in listed_gate_contracts():
+    if name in listed_gate_contracts() or name in listed_gate_spot_pairs():
         return True
     try:
-        bars = fetch_gate_equity_klines(name, limit=2, interval="1d")
+        venue = gate_venue_for_pair(name)
+        bars = fetch_gate_equity_klines(name, limit=2, interval="1d", venue=venue)
         return bool(bars)
     except Exception:
         return False
@@ -1807,11 +1866,29 @@ def fetch_global_instrument(code: str, interval: str | None = None,
     mapped = bool(gate_contract_for(canon))
     contract = (ident.get("gate_contract") or gate_contract_for(canon)
                 or (guess_us_gate_contract(canon) if cls == "us_stock" else None))
-    if contract and (mapped or contract in listed_gate_contracts()):
+    venue = ident.get("gate_venue") or (gate_venue_for_pair(contract) if contract else None)
+    listed = False
+    if contract:
+        if mapped:
+            listed = True
+        elif venue == "spot":
+            listed = contract in listed_gate_spot_pairs()
+        else:
+            listed = contract in listed_gate_contracts()
+    if contract and listed:
         try:
-            bars = fetch_gate_equity_klines(contract, limit=lookback, interval=iv)
+            bars = fetch_gate_equity_klines(contract, limit=lookback, interval=iv, venue=venue)
         except Exception:
             bars = []
+        if not bars and venue == "spot":
+            fb = guess_us_gate_contract(canon) if cls == "us_stock" else None
+            if fb and fb != contract and fb in listed_gate_contracts():
+                try:
+                    bars = fetch_gate_equity_klines(fb, limit=lookback, interval=iv, venue="futures")
+                except Exception:
+                    bars = []
+                if bars:
+                    contract, venue = fb, "futures"
         if bars:
             px = bars[-1]["close"]
             chg = None
@@ -1826,6 +1903,7 @@ def fetch_global_instrument(code: str, interval: str | None = None,
                 "interval": iv, "interval_note": None, "interval_limited": False,
                 "tokenized": True,
                 "gate_contract": contract,
+                "gate_venue": venue,
                 "market": "crypto",
             }
 

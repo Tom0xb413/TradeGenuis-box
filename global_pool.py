@@ -9,9 +9,10 @@
   - 美/日/韩指数 + 固定美股大盘 + 少量日韩龙头
 
 K 线周期 crypto_interval ∈ {4h, 8h, 1d}，默认 1d。
-有 Gate 股票代币的标的主路径走 Gate USDT 永续（干净名如 AAPL_USDT，原生 4h/8h/1d，与币相同）；
+有 Gate 股票代币的标的：优先现货 xStock（AAPLX_USDT，VPS 实测原生 1h/4h/8h），
+没有 *X 再用 USDT 永续干净名（MSFT_USDT / SPX500_USDT）；不用 3L/3S。
 无代币的美股/美指再走新浪 US_MinKService.getMinK（4h/8h）或日K；日韩正股无代币时才 Sina/Naver 日K。
-代币跟踪正股但存在基差，不是交易所官方打印。不使用杠杆 3L/3S，也不把 xStock（AAPLX）当默认映射。
+代币跟踪正股但存在基差，不是交易所官方打印。
 Yahoo 仅作遗留函数保留；扫描主路径不再 Yahoo-first。
 覆盖池非空时扫描只扫用户标的，见 data/global_override_pool.json。
 """
@@ -78,20 +79,22 @@ KR_STOCKS: tuple[dict, ...] = (
     {"symbol": "000660", "name": "SK海力士"},
 )
 
-# Gate.io USDT 永续股票代币（2026-09 VPS/本环境实测）。值是合约名（优先期货干净名，不用 *X/*G/*ON/3L/3S）。
+# Gate 股票代币（2026-09 VPS/本环境实测）。值是交易对。
+# 优先现货 xStock *X（AAPLX_USDT）；无 *X 再用 USDT 永续干净名。不用 3L/3S / *G / *ON。
 # 这是代币、可能与正股有基差；不是纽交所/东证/韩交所官方行情。
-# 未列入：Mastercard MA、纳指综合 .IXIC、日经 NKY、KOSPI/KOSDAQ、日元丰田 7203.T（无 TOYOTA 合约）。
+# 未列入：纳指综合 .IXIC、日经 NKY、KOSPI/KOSDAQ、日元丰田 7203.T（无 TOYOTA 合约）。
 # 不映射 JPN225_USDT：报价约 427，与日经 6 万点不是同一标尺。
-# 不映射 DIA_USDT：那是加密 DIA，不是道指 ETF。
+# 不映射 DIA_USDT：加密 DIA。不映射 WMTX_USDT：报价约 0.03，不是沃尔玛。
+# Mastercard 无永续 MA_USDT（现货 MA_USDT 是 Mind AI）；现货 xStock 为 MAX_USDT。
 GATE_EQUITY_MAP: dict[str, str] = {
-    "AAPL": "AAPL_USDT", "MSFT": "MSFT_USDT", "NVDA": "NVDA_USDT",
-    "GOOGL": "GOOGL_USDT", "AMZN": "AMZN_USDT", "META": "META_USDT",
-    "TSLA": "TSLA_USDT", "BRK-B": "BRKB_USDT", "JPM": "JPM_USDT",
-    "V": "V_USDT", "UNH": "UNH_USDT", "XOM": "XOM_USDT",
-    "JNJ": "JNJ_USDT", "WMT": "WMT_USDT", "PG": "PG_USDT",
-    "HD": "HD_USDT", "COST": "COST_USDT", "AVGO": "AVGO_USDT",
-    "NFLX": "NFLX_USDT",
-    ".INX": "SPX500_USDT",   # 勿用 SPX_USDT（报价约 0.53，不是标普）
+    "AAPL": "AAPLX_USDT", "MSFT": "MSFT_USDT", "NVDA": "NVDAX_USDT",
+    "GOOGL": "GOOGLX_USDT", "AMZN": "AMZNX_USDT", "META": "METAX_USDT",
+    "TSLA": "TSLAX_USDT", "BRK-B": "BRKB_USDT", "JPM": "JPM_USDT",
+    "V": "V_USDT", "UNH": "UNHX_USDT", "XOM": "XOM_USDT",
+    "JNJ": "JNJ_USDT", "WMT": "WMT_USDT", "MA": "MAX_USDT",
+    "PG": "PGX_USDT", "HD": "HDX_USDT", "COST": "COST_USDT",
+    "AVGO": "AVGOX_USDT", "NFLX": "NFLXX_USDT",
+    ".INX": "SPX500_USDT",   # 指数点数；ETF 用额外 SPYX_USDT。勿用 SPX_USDT
     ".DJI": "US30_USDT",
     ".NDX": "NAS100_USDT",
     "6758.T": "SONY_USDT",
@@ -99,31 +102,39 @@ GATE_EQUITY_MAP: dict[str, str] = {
     "000660": "SKHYNIX_USDT",
 }
 
-# 覆盖池可解析、但不进默认宇宙的 Gate 代币（VPS 表：ETF / 常见美股 / 丰田 ADR）。
+# 必须走现货 K 线的交易对（xStock *X）。其余映射走 USDT 永续。
+GATE_SPOT_EQUITY = frozenset({
+    "AAPLX_USDT", "NVDAX_USDT", "GOOGLX_USDT", "AMZNX_USDT", "METAX_USDT",
+    "TSLAX_USDT", "UNHX_USDT", "MAX_USDT", "PGX_USDT", "HDX_USDT",
+    "AVGOX_USDT", "NFLXX_USDT",
+    "SPYX_USDT", "QQQX_USDT", "COINX_USDT", "HOODX_USDT", "MSTRX_USDT",
+})
+
+# 覆盖池可解析、但不进默认宇宙。
 GATE_EXTRA_EQUITY: dict[str, tuple[str, str, str]] = {
-    "SPY": ("SPY_USDT", "SPY", "us_stock"),
-    "QQQ": ("QQQ_USDT", "QQQ", "us_stock"),
+    "SPY": ("SPYX_USDT", "SPY", "us_stock"),
+    "QQQ": ("QQQX_USDT", "QQQ", "us_stock"),
     "IWM": ("IWM_USDT", "IWM", "us_stock"),
     "SQQQ": ("SQQQ_USDT", "SQQQ", "us_stock"),
-    "COIN": ("COIN_USDT", "COIN", "us_stock"),
+    "COIN": ("COINX_USDT", "COIN", "us_stock"),
     "BABA": ("BABA_USDT", "BABA", "us_stock"),
     "AMD": ("AMD_USDT", "AMD", "us_stock"),
     "ARM": ("ARM_USDT", "ARM", "us_stock"),
     "PLTR": ("PLTR_USDT", "PLTR", "us_stock"),
-    "HOOD": ("HOOD_USDT", "HOOD", "us_stock"),
-    "MSTR": ("MSTR_USDT", "MSTR", "us_stock"),
+    "HOOD": ("HOODX_USDT", "HOOD", "us_stock"),
+    "MSTR": ("MSTRX_USDT", "MSTR", "us_stock"),
     "IBM": ("IBM_USDT", "IBM", "us_stock"),
     "ORCL": ("ORCL_USDT", "ORCL", "us_stock"),
     "TM": ("TM_USDT", "丰田ADR", "us_stock"),  # 美元 ADR 代币；不要当作 7203.T 日元正股
 }
 
 # 猜 {TICKER}_USDT 时跳过：与加密货币撞名，或明显不是股票代币。
-GATE_GUESS_BLOCKLIST = frozenset({"DIA"})  # DIA_USDT = crypto DIA
+GATE_GUESS_BLOCKLIST = frozenset({"DIA", "MA"})  # DIA_USDT=crypto DIA；MA_USDT=Mind AI
 _LEVERAGED_TAILS = ("3L", "3S", "5L", "5S", "2L", "2S")
 
 
 def _build_gate_aliases() -> dict[str, str]:
-    """AAPL_USDT / TM / SPX500 / SAMSUNG → 规范代码。"""
+    """AAPLX_USDT / AAPL_USDT / TM / SPX500 / SAMSUNG / MAX → 规范代码。"""
     out: dict[str, str] = {}
     def add(alias: str, code: str) -> None:
         if not alias:
@@ -138,12 +149,31 @@ def _build_gate_aliases() -> dict[str, str]:
         add(contract, code)
         base = contract[:-5] if contract.endswith("_USDT") else contract
         add(base, code)
+        # 永续干净名仍指向同一正股（AAPL_USDT → AAPL）；MA_USDT 是 Mind AI，不要别名
+        if code not in ("MA",) and not code.startswith(".") and not code[:1].isdigit() \
+                and not str(code).endswith(".T"):
+            ticker = code.replace("-", "").replace(".", "")
+            add(f"{ticker}_USDT", code)
     for code, (contract, _name, _cls) in GATE_EXTRA_EQUITY.items():
         add(code, code)
         add(contract, code)
         base = contract[:-5] if contract.endswith("_USDT") else contract
         add(base, code)
+        if gate_venue_for_pair(contract) == "spot":
+            add(f"{code}_USDT", code)
     return out
+
+
+def _gate_pair_norm(pair: str) -> str:
+    s = (pair or "").strip()
+    if "_" not in s and s.upper().endswith("USDT") and len(s) > 4:
+        return f"{s[:-4]}_USDT"
+    return s
+
+
+def gate_venue_for_pair(pair: str) -> str:
+    """spot = xStock 现货 K 线；futures = USDT 永续。"""
+    return "spot" if _gate_pair_norm(pair) in GATE_SPOT_EQUITY else "futures"
 
 
 _GATE_ALIASES = _build_gate_aliases()
@@ -184,6 +214,14 @@ def gate_equity_norm_set() -> set[str]:
     """涨幅榜应排除的股票代币（规范化无下划线）。"""
     out = {_norm_crypto(v) for v in GATE_EQUITY_MAP.values()}
     out |= {_norm_crypto(v[0]) for v in GATE_EXTRA_EQUITY.values()}
+    out |= {_norm_crypto(p) for p in GATE_SPOT_EQUITY}
+    for code in US_STOCKS:
+        t = code.replace("-", "").replace(".", "")
+        out.add(_norm_crypto(t + "USDT"))
+        out.add(_norm_crypto(t + "XUSDT"))
+    for code in GATE_EXTRA_EQUITY:
+        out.add(_norm_crypto(code + "USDT"))
+        out.add(_norm_crypto(code + "XUSDT"))
     return out
 
 
@@ -211,7 +249,7 @@ def is_stock_token_ticker(sym: str) -> bool:
 
 
 def _with_gate(ident: dict | None) -> dict | None:
-    """给 ident 打上 gate_contract / tokenized；有静态映射则 source=gate。"""
+    """给 ident 打上 gate_contract / tokenized / gate_venue；有静态映射则 source=gate。"""
     if not ident:
         return ident
     if ident.get("asset_class") in ("crypto", "gold"):
@@ -221,6 +259,7 @@ def _with_gate(ident: dict | None) -> dict | None:
         ident["gate_contract"] = g
         ident["tokenized"] = True
         ident["source"] = "gate"
+        ident["gate_venue"] = gate_venue_for_pair(g)
     return ident
 
 
@@ -493,6 +532,8 @@ def validate_symbol(code: str, crypto_ok=None, gate_ok=None) -> dict:
     extra = {}
     if ident.get("gate_contract"):
         extra["gate_contract"] = ident["gate_contract"]
+    if ident.get("gate_venue"):
+        extra["gate_venue"] = ident["gate_venue"]
     if ident.get("tokenized"):
         extra["tokenized"] = True
     if cls == "gold":
@@ -514,7 +555,7 @@ def validate_symbol(code: str, crypto_ok=None, gate_ok=None) -> dict:
     if mapped and contract:
         return {"ok": True, "reason": "", "code": ident["code"], "name": ident["name"],
                 "asset_class": cls, "source": "gate", "tokenized": True,
-                "gate_contract": contract}
+                "gate_contract": contract, "gate_venue": gate_venue_for_pair(contract)}
     if not contract and cls == "us_stock":
         contract = guess_us_gate_contract(ident["code"])
     if contract and gate_ok is not None:
@@ -522,7 +563,8 @@ def validate_symbol(code: str, crypto_ok=None, gate_ok=None) -> dict:
             if gate_ok(contract):
                 return {"ok": True, "reason": "", "code": ident["code"], "name": ident["name"],
                         "asset_class": cls, "source": "gate", "tokenized": True,
-                        "gate_contract": contract}
+                        "gate_contract": contract,
+                        "gate_venue": gate_venue_for_pair(contract)}
         except Exception:
             pass
 
@@ -550,6 +592,8 @@ def validate_symbols(symbols: list[str], crypto_ok=None, gate_ok=None) -> dict:
             payload = {k: row[k] for k in ("code", "name", "asset_class", "source") if k in row}
             if row.get("gate_contract"):
                 payload["gate_contract"] = row["gate_contract"]
+            if row.get("gate_venue"):
+                payload["gate_venue"] = row["gate_venue"]
             if row.get("tokenized"):
                 payload["tokenized"] = True
             ok_rows.append(payload)
@@ -664,6 +708,7 @@ def _pool_item(code: str, name: str, asset_class: str, source: str,
         item["gate_contract"] = g
         item["tokenized"] = True
         item["source"] = "gate"
+        item["gate_venue"] = gate_venue_for_pair(g)
     return item
 
 
@@ -677,7 +722,7 @@ def _ident_to_pool_item(ident: dict, ticker_map: dict | None = None) -> dict:
     if t:
         item["price"] = t.get("price")
         item["chg"] = t.get("chg")
-    for k in ("sina_symbol", "naver_code", "znb", "sina_gi", "gate_contract"):
+    for k in ("sina_symbol", "naver_code", "znb", "sina_gi", "gate_contract", "gate_venue"):
         if ident.get(k):
             item[k] = ident[k]
     if ident.get("tokenized"):
