@@ -177,7 +177,10 @@ class PoolBuilderTest(unittest.TestCase):
         self.assertEqual(ma["source"], "sina")
         nky = next(x for x in by["jp_index"] if x["code"] == "NKY")
         self.assertEqual(nky["source"], "sina")
-        self.assertEqual(next(x for x in by["jp_stock"] if x["code"] == "7203.T")["gate_contract"], "TM_USDT")
+        toyota = next(x for x in by["jp_stock"] if x["code"] == "7203.T")
+        self.assertFalse(toyota.get("tokenized"))
+        self.assertIsNone(gp.gate_contract_for("7203.T"))
+        self.assertEqual(next(x for x in by["jp_stock"] if x["code"] == "6758.T")["gate_contract"], "SONY_USDT")
         self.assertEqual(next(x for x in by["kr_stock"] if x["code"] == "005930")["gate_contract"], "SAMSUNG_USDT")
 
     def test_gold_perp_not_counted_in_topn(self):
@@ -234,11 +237,18 @@ class PoolBuilderTest(unittest.TestCase):
         self.assertEqual(gp.resolve_symbol("AAPLUSDT")["code"], "AAPL")
         self.assertTrue(gp.resolve_symbol("AAPL")["tokenized"])
         self.assertEqual(gp.resolve_symbol("AAPL")["gate_contract"], "AAPL_USDT")
-        self.assertEqual(gp.resolve_symbol("TM")["code"], "7203.T")
+        self.assertEqual(gp.resolve_symbol("TM")["code"], "TM")
+        self.assertEqual(gp.resolve_symbol("TM")["name"], "丰田ADR")
+        self.assertEqual(gp.resolve_symbol("TM")["gate_contract"], "TM_USDT")
+        self.assertFalse(gp.resolve_symbol("7203.T").get("tokenized"))
         self.assertEqual(gp.resolve_symbol("SAMSUNG")["code"], "005930")
         self.assertEqual(gp.resolve_symbol("SPX500")["code"], ".INX")
         self.assertEqual(gp.resolve_symbol("NAS100")["code"], ".NDX")
         self.assertEqual(gp.resolve_symbol("QQQ")["gate_contract"], "QQQ_USDT")
+        self.assertEqual(gp.resolve_symbol("PLTR")["gate_contract"], "PLTR_USDT")
+        self.assertEqual(gp.resolve_symbol("PLTR_USDT")["code"], "PLTR")
+        self.assertIsNone(gp.guess_us_gate_contract("DIA"))
+        self.assertFalse(gp.resolve_symbol("DIA").get("tokenized"))
         self.assertIsNone(gp.resolve_symbol("NOT_A_THING_ZZZ"))
         self.assertIsNone(gp.resolve_symbol(""))
 
@@ -533,6 +543,7 @@ class DashboardGlobalPoolContractTest(unittest.TestCase):
         self.assertIn("覆盖池已变更", self.html)
         self.assertIn("股票代币", self.html)
         self.assertIn("美股代币", self.html)
+        self.assertIn("新浪分钟K", self.html)
 
 
 class ValidateSymbolTest(unittest.TestCase):
@@ -706,6 +717,46 @@ class GateTokenPathTest(unittest.TestCase):
         self.assertFalse(any(x["code"] == "AAPLUSDT" for x in crypto))
         self.assertEqual(len(crypto), 20)
         self.assertTrue(any(x["code"] == "AAPL" and x.get("tokenized") for x in pool))
+
+    def test_xstock_and_leverage_excluded_from_crypto_topn(self):
+        tickers = (
+            [{"symbol": "AAPLXUSDT", "price": 1, "chg": 99}]
+            + [{"symbol": "AAPL3LUSDT", "price": 1, "chg": 98}]
+            + _tickers(20)
+        )
+        pool = gp.build_global_pool(tickers, top_n=20, gold=_gold_row())
+        crypto = [x for x in pool if x["asset_class"] == "crypto"]
+        self.assertFalse(any(x["code"] in ("AAPLXUSDT", "AAPL3LUSDT") for x in crypto))
+        self.assertEqual(len(crypto), 20)
+
+    def test_ma_unlisted_skips_gate_kline(self):
+        mink = {
+            "code": "MA", "name": "MA", "price": 550.0, "chg": 0,
+            "bars": _h1_bars(8), "source": "sina", "asset_class": "us_stock",
+            "interval": "4h", "interval_note": None, "interval_limited": False,
+            "tokenized": False,
+        }
+        with patch.object(sc, "listed_gate_contracts", return_value={"AAPL_USDT"}), \
+             patch.object(sc, "fetch_gate_equity_klines",
+                          side_effect=AssertionError("MA 无合约不应打 Gate")), \
+             patch("equity_sources.fetch_equity_instrument", return_value=mink):
+            out = sc.fetch_global_instrument("MA", interval="4h")
+        self.assertEqual(out["source"], "sina")
+        self.assertFalse(out.get("tokenized"))
+        self.assertIsNone(out.get("interval_note"))
+
+    def test_pltr_extra_maps_to_gate(self):
+        with patch.object(sc, "fetch_gate_equity_klines",
+                          return_value=_daily_bars(50)) as mock_g, \
+             patch.object(sc, "fetch_crypto_kline",
+                          side_effect=AssertionError("no binance")):
+            inst = sc.fetch_global_instrument("PLTR", interval="4h")
+        mock_g.assert_called_once()
+        self.assertEqual(mock_g.call_args[0][0], "PLTR_USDT")
+        self.assertTrue(inst["tokenized"])
+        row = gp.validate_symbol("PLTR_USDT", crypto_ok=lambda *_: False, gate_ok=lambda *_: False)
+        self.assertTrue(row["ok"])
+        self.assertEqual(row["gate_contract"], "PLTR_USDT")
 
 
 if __name__ == "__main__":

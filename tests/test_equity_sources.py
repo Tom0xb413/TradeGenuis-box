@@ -23,6 +23,25 @@ SINA_JSONP_AAPL = (
     '{"d":"2024-01-03","o":"105","h":"112","l":"101","c":"108","v":"1100","a":"0"}'
     '])'
 )
+SINA_JSONP_MINK = (
+    '/*<script>location.href=\'//sina.com\';</script>*/ '
+    'IO.XSRV2.CallbackList(['
+    '{"d":"2026-02-05 12:00:00","o":"100","h":"110","l":"90","c":"105","v":"1000","a":"0"},'
+    '{"d":"2026-02-05 16:00:00","o":"105","h":"112","l":"101","c":"108","v":"1100","a":"0"}'
+    '])'
+)
+SINA_JSONP_MINK_HOUR = (
+    'IO.XSRV2.CallbackList(['
+    '{"d":"2024-01-02 00:00:00","o":"100","h":"101","l":"99","c":"100.5","v":"10"},'
+    '{"d":"2024-01-02 01:00:00","o":"101","h":"102","l":"100","c":"101.5","v":"11"},'
+    '{"d":"2024-01-02 02:00:00","o":"102","h":"103","l":"101","c":"102.5","v":"12"},'
+    '{"d":"2024-01-02 03:00:00","o":"103","h":"104","l":"102","c":"103.5","v":"13"},'
+    '{"d":"2024-01-02 04:00:00","o":"104","h":"105","l":"103","c":"104.5","v":"14"},'
+    '{"d":"2024-01-02 05:00:00","o":"105","h":"106","l":"104","c":"105.5","v":"15"},'
+    '{"d":"2024-01-02 06:00:00","o":"106","h":"107","l":"105","c":"106.5","v":"16"},'
+    '{"d":"2024-01-02 07:00:00","o":"107","h":"108","l":"106","c":"107.5","v":"17"}'
+    '])'
+)
 SINA_HQ_AAPL = (
     'var hq_str_gb_aapl="苹果,319.9700,-2.51,2026-09-05 09:46:58,-8.2400,'
     '328.3050,328.9300,317.8600";\n'
@@ -70,6 +89,12 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(bars[0]["open"], 100.0)
         self.assertEqual(bars[1]["close"], 108.0)
         self.assertEqual(eq.parse_sina_jsonp_daily("IO.XSRV2.CallbackList(null);"), [])
+
+    def test_sina_jsonp_mink_keeps_time(self):
+        bars = eq.parse_sina_jsonp_ohlc(SINA_JSONP_MINK, keep_time=True)
+        self.assertEqual(len(bars), 2)
+        self.assertEqual(bars[0]["date"], "2026-02-05 12:00")
+        self.assertEqual(eq.parse_sina_jsonp_ohlc(SINA_JSONP_AAPL, keep_time=True), [])
 
     def test_sina_hq(self):
         q = eq.parse_sina_hq(SINA_HQ_AAPL)
@@ -133,6 +158,54 @@ class FetchRoutingTest(unittest.TestCase):
 
         ident = gp.resolve_symbol("AAPL")
         with patch.object(eq, "http_get", side_effect=fake_get):
+            inst = eq.fetch_equity_instrument(ident, interval="4h", lookback=10)
+        self.assertTrue(inst["interval_limited"])
+        self.assertIn("日K", inst["interval_note"])
+
+    def test_us_4h_uses_mink_without_note(self):
+        def fake_get(url, params=None, headers=None, timeout=10):
+            if "getMinK" in (url or "") and str((params or {}).get("type")) == "240":
+                return 200, SINA_JSONP_MINK
+            if "hq.sinajs" in (url or ""):
+                return 200, SINA_HQ_AAPL
+            return 404, ""
+
+        ident = gp.resolve_symbol("MA")
+        with patch.object(eq, "http_get", side_effect=fake_get):
+            inst = eq.fetch_equity_instrument(ident, interval="4h", lookback=10)
+        self.assertIsNotNone(inst)
+        self.assertFalse(inst.get("interval_limited"))
+        self.assertIsNone(inst.get("interval_note"))
+        self.assertEqual(inst["interval"], "4h")
+        self.assertEqual(inst["bars"][0]["date"], "2026-02-05 12:00")
+
+    def test_us_8h_resamples_hour_mink(self):
+        def fake_get(url, params=None, headers=None, timeout=10):
+            if "getMinK" in (url or "") and str((params or {}).get("type")) == "60":
+                return 200, SINA_JSONP_MINK_HOUR
+            if "hq.sinajs" in (url or ""):
+                return 200, SINA_HQ_EMPTY
+            return 404, ""
+
+        ident = gp.resolve_symbol("MA")
+        with patch.object(eq, "http_get", side_effect=fake_get):
+            inst = eq.fetch_equity_instrument(ident, interval="8h", lookback=10)
+        self.assertEqual(inst["interval"], "8h")
+        self.assertIsNone(inst.get("interval_note"))
+        self.assertEqual(len(inst["bars"]), 1)
+        self.assertEqual(inst["bars"][0]["date"], "2024-01-02 00:00")
+        self.assertEqual(inst["bars"][0]["open"], 100.0)
+        self.assertEqual(inst["bars"][0]["close"], 107.5)
+
+    def test_jp_4h_still_daily_note(self):
+        def fake_json(url, params=None, headers=None, timeout=10):
+            if "7203.T" in url and "/price" in url:
+                return NAVER_JP
+            return {"code": "StockConflict"}
+
+        ident = gp.resolve_symbol("7203.T")
+        with patch.object(eq, "http_json", side_effect=fake_json), \
+             patch.object(eq, "http_get", return_value=(404, "")):
             inst = eq.fetch_equity_instrument(ident, interval="4h", lookback=10)
         self.assertTrue(inst["interval_limited"])
         self.assertIn("日K", inst["interval_note"])

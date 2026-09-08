@@ -17,8 +17,9 @@
   热点概念 ：push2.eastmoney.com clist + emweb F10  备用 AKShare（新浪概念 / 同花顺）
   全市场名单：东财 clist  备用新浪 sh_a+sz_a（不用 hs_a）  再备用 AKShare 官方名单
   全市场标的 Tab ：USDT 永续 TOP20 + 黄金 + 美/日/韩指数与龙头（见 global_pool.py）
-             Binance USDT 永续失败后粘性回退 Gate.io；有 Gate 股票代币则走代币 K 线（非官方正股），否则 Sina/Naver 日K
-             K 线周期 crypto_interval：4h | 8h | 1d（默认 1d；股票无 4h/8h 历史时回退日K）
+             Binance USDT 永续失败后粘性回退 Gate.io；有 Gate 股票代币则走代币 K 线（非官方正股）；
+             无代币美股走新浪 getMinK / 日K，日韩正股走 Naver/Sina 日K
+             K 线周期 crypto_interval：4h | 8h | 1d（默认 1d）
 
 用法：
   pip install requests
@@ -1766,7 +1767,7 @@ def fetch_global_instrument(code: str, interval: str | None = None,
                             hint_class: str | None = None) -> dict | None:
     """
     全市场标的 Tab 任意代码：永续/黄金走币所；
-    股票/指数优先 Gate 股票代币（原生 4h/8h/1d），无代币或失败再 Sina/Naver 日K。
+    股票/指数优先 Gate 股票代币（原生 4h/8h/1d），无代币或失败再 Sina 分钟K/日K 或 Naver 日K。
     失败返回 None。
     """
     iv = normalize_crypto_interval(interval or load_crypto_interval())
@@ -1803,9 +1804,10 @@ def fetch_global_instrument(code: str, interval: str | None = None,
     if not ident:
         return None
 
+    mapped = bool(gate_contract_for(canon))
     contract = (ident.get("gate_contract") or gate_contract_for(canon)
                 or (guess_us_gate_contract(canon) if cls == "us_stock" else None))
-    if contract:
+    if contract and (mapped or contract in listed_gate_contracts()):
         try:
             bars = fetch_gate_equity_klines(contract, limit=lookback, interval=iv)
         except Exception:

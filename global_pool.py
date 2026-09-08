@@ -9,8 +9,9 @@
   - 美/日/韩指数 + 固定美股大盘 + 少量日韩龙头
 
 K 线周期 crypto_interval ∈ {4h, 8h, 1d}，默认 1d。
-有 Gate 股票代币的标的主路径走 Gate 永续（原生 4h/8h/1d，与币相同）；
-无代币时才回退 Sina / Naver 日K（见 equity_sources.py）。代币跟踪正股但存在基差，不是交易所官方打印。
+有 Gate 股票代币的标的主路径走 Gate USDT 永续（干净名如 AAPL_USDT，原生 4h/8h/1d，与币相同）；
+无代币的美股/美指再走新浪 US_MinKService.getMinK（4h/8h）或日K；日韩正股无代币时才 Sina/Naver 日K。
+代币跟踪正股但存在基差，不是交易所官方打印。不使用杠杆 3L/3S，也不把 xStock（AAPLX）当默认映射。
 Yahoo 仅作遗留函数保留；扫描主路径不再 Yahoo-first。
 覆盖池非空时扫描只扫用户标的，见 data/global_override_pool.json。
 """
@@ -77,10 +78,11 @@ KR_STOCKS: tuple[dict, ...] = (
     {"symbol": "000660", "name": "SK海力士"},
 )
 
-# Gate.io USDT 永续股票代币（2026-09 VPS/本环境实测）。值是合约名。
+# Gate.io USDT 永续股票代币（2026-09 VPS/本环境实测）。值是合约名（优先期货干净名，不用 *X/*G/*ON/3L/3S）。
 # 这是代币、可能与正股有基差；不是纽交所/东证/韩交所官方行情。
-# 未列入的标的（Mastercard MA、纳指综合 .IXIC、日经 NKY、KOSPI/KOSDAQ）仍走 Sina/Naver 日K。
+# 未列入：Mastercard MA、纳指综合 .IXIC、日经 NKY、KOSPI/KOSDAQ、日元丰田 7203.T（无 TOYOTA 合约）。
 # 不映射 JPN225_USDT：报价约 427，与日经 6 万点不是同一标尺。
+# 不映射 DIA_USDT：那是加密 DIA，不是道指 ETF。
 GATE_EQUITY_MAP: dict[str, str] = {
     "AAPL": "AAPL_USDT", "MSFT": "MSFT_USDT", "NVDA": "NVDA_USDT",
     "GOOGL": "GOOGL_USDT", "AMZN": "AMZN_USDT", "META": "META_USDT",
@@ -92,17 +94,32 @@ GATE_EQUITY_MAP: dict[str, str] = {
     ".INX": "SPX500_USDT",   # 勿用 SPX_USDT（报价约 0.53，不是标普）
     ".DJI": "US30_USDT",
     ".NDX": "NAS100_USDT",
-    "7203.T": "TM_USDT",     # 丰田 ADR 代币
     "6758.T": "SONY_USDT",
     "005930": "SAMSUNG_USDT",
     "000660": "SKHYNIX_USDT",
 }
 
-# 覆盖池可解析、但不进默认宇宙的 Gate 代币（ETF 等）。
+# 覆盖池可解析、但不进默认宇宙的 Gate 代币（VPS 表：ETF / 常见美股 / 丰田 ADR）。
 GATE_EXTRA_EQUITY: dict[str, tuple[str, str, str]] = {
     "SPY": ("SPY_USDT", "SPY", "us_stock"),
     "QQQ": ("QQQ_USDT", "QQQ", "us_stock"),
+    "IWM": ("IWM_USDT", "IWM", "us_stock"),
+    "SQQQ": ("SQQQ_USDT", "SQQQ", "us_stock"),
+    "COIN": ("COIN_USDT", "COIN", "us_stock"),
+    "BABA": ("BABA_USDT", "BABA", "us_stock"),
+    "AMD": ("AMD_USDT", "AMD", "us_stock"),
+    "ARM": ("ARM_USDT", "ARM", "us_stock"),
+    "PLTR": ("PLTR_USDT", "PLTR", "us_stock"),
+    "HOOD": ("HOOD_USDT", "HOOD", "us_stock"),
+    "MSTR": ("MSTR_USDT", "MSTR", "us_stock"),
+    "IBM": ("IBM_USDT", "IBM", "us_stock"),
+    "ORCL": ("ORCL_USDT", "ORCL", "us_stock"),
+    "TM": ("TM_USDT", "丰田ADR", "us_stock"),  # 美元 ADR 代币；不要当作 7203.T 日元正股
 }
+
+# 猜 {TICKER}_USDT 时跳过：与加密货币撞名，或明显不是股票代币。
+GATE_GUESS_BLOCKLIST = frozenset({"DIA"})  # DIA_USDT = crypto DIA
+_LEVERAGED_TAILS = ("3L", "3S", "5L", "5S", "2L", "2S")
 
 
 def _build_gate_aliases() -> dict[str, str]:
@@ -147,13 +164,17 @@ def gate_contract_for(code: str) -> str | None:
 
 
 def guess_us_gate_contract(code: str) -> str | None:
-    """美股 ticker → 候选合约：BRK-B → BRKB_USDT，AAPL → AAPL_USDT。"""
+    """美股 ticker → 候选合约：BRK-B → BRKB_USDT，AAPL → AAPL_USDT。DIA/杠杆后缀不猜。"""
     raw = (code or "").strip()
     if not raw or raw.startswith(".") or raw.endswith(".T") or raw[:1].isdigit():
         return None
     s = raw.replace("-", "").replace(".", "").upper()
     if s.endswith("USDT") and len(s) > 4:
         s = s[:-4]
+    if s in GATE_GUESS_BLOCKLIST:
+        return None
+    if any(s.endswith(t) for t in _LEVERAGED_TAILS):
+        return None
     if not re.fullmatch(r"[A-Z]{1,6}", s):
         return None
     return f"{s}_USDT"
@@ -164,6 +185,29 @@ def gate_equity_norm_set() -> set[str]:
     out = {_norm_crypto(v) for v in GATE_EQUITY_MAP.values()}
     out |= {_norm_crypto(v[0]) for v in GATE_EXTRA_EQUITY.values()}
     return out
+
+
+def is_stock_token_ticker(sym: str) -> bool:
+    """
+    涨幅榜排除：映射表合约、xStock（AAPLXUSDT）、杠杆（AAPL3LUSDT）以及 *G/*ON 现货变体。
+    避免股票代币占掉 CRYPTO_TOP_N。
+    """
+    s = _norm_crypto(sym)
+    if not s:
+        return False
+    if s in gate_equity_norm_set():
+        return True
+    if not s.endswith("USDT") or len(s) <= 4:
+        return False
+    base = s[:-4]
+    if any(base.endswith(t) for t in _LEVERAGED_TAILS):
+        return True
+    for suf, n in (("ON", 2), ("X", 1), ("G", 1)):
+        if base.endswith(suf) and len(base) > n:
+            core = base[:-n]
+            if gate_contract_for(core) or core in US_STOCKS or core in GATE_EXTRA_EQUITY:
+                return True
+    return False
 
 
 def _with_gate(ident: dict | None) -> dict | None:
@@ -321,7 +365,7 @@ def _lookup_static(code: str) -> dict | None:
 def resolve_symbol(raw: str) -> dict | None:
     """
     把用户输入规范为内部 ident。
-    例：AAPL、AAPL_USDT、7203.T、TM、005930、SAMSUNG、.INX、SPX500、日经225指数、BTCUSDT、黄金。
+    例：AAPL、AAPL_USDT、7203.T、TM（丰田ADR代币）、005930、SAMSUNG、.INX、SPX500、PLTR、日经225指数、BTCUSDT、黄金。
     无法归类则返回 None（校验层报「未知标的」）。
     """
     s = (raw or "").strip()
@@ -688,7 +732,6 @@ def build_global_pool(crypto_tickers: list[dict], top_n: int = CRYPTO_TOP_N,
     gold_codes = set(GOLD_CRYPTO_SYMBOLS)
     if gold and gold.get("code"):
         gold_codes.add(str(gold["code"]))
-    equity_gate = gate_equity_norm_set()
 
     pool: list[dict] = []
     seen: set[str] = set()
@@ -705,7 +748,7 @@ def build_global_pool(crypto_tickers: list[dict], top_n: int = CRYPTO_TOP_N,
         if taken >= n:
             break
         sym = _norm_crypto(str(t.get("symbol") or t.get("code") or ""))
-        if not sym or sym in gold_codes or sym in equity_gate:
+        if not sym or sym in gold_codes or is_stock_token_ticker(sym):
             continue
         add(_pool_item(
             sym, sym, "crypto", "crypto",

@@ -272,7 +272,7 @@
         <button class="tab" data-box-mode="p1" type="button" title="斜向通道：OLS 中轴 + 残差分位数 + ADX">P1通道</button>
       </div>
     </div>
-    <div class="box-mode" id="cryptoIntervalWrap" title="全市场标的 K 线周期。币/金/股票代币用 Gate 原生 4h/8h/1d；无代币的股票指数回退日K。切换后请强制重扫" style="display:none">
+    <div class="box-mode" id="cryptoIntervalWrap" title="全市场标的 K 线周期。币/金/股票代币用 Gate 原生 4h/8h/1d；无代币的美股/美指用新浪分钟K；日韩正股无代币则日K。切换后请强制重扫" style="display:none">
       <span class="k">周期</span>
       <div class="tabs" id="cryptoIntervalTabs">
         <button class="tab" data-interval="4h" type="button">4h</button>
@@ -341,8 +341,8 @@
 <div class="modal-bg" id="coverModal" hidden>
   <div class="modal" role="dialog" aria-labelledby="coverModalTitle">
     <h4 id="coverModalTitle">覆盖标的池</h4>
-    <p class="hint">逗号或换行分隔。非空时扫描<b>只扫这些标的</b>；清空则恢复默认混合池（币 TOP20 + 黄金 + 美/日/韩指数与龙头）。美股等优先校验 Gate <b>股票代币</b>（如 AAPL_USDT），与正股可能有基差；无代币再走 Sina/Naver 日K。</p>
-    <textarea id="coverSymbols" placeholder="AAPL, AAPL_USDT, .INX, 7203.T, TM, 005930, BTCUSDT, 黄金"></textarea>
+    <p class="hint">逗号或换行分隔。非空时扫描<b>只扫这些标的</b>；清空则恢复默认混合池（币 TOP20 + 黄金 + 美/日/韩指数与龙头）。美股等优先校验 Gate <b>股票代币</b>（如 AAPL_USDT，跟踪正股但有基差，非交易所官方打印）；无代币的美股可用新浪分钟K，日韩正股再走 Naver/Sina 日K。</p>
+    <textarea id="coverSymbols" placeholder="AAPL, AAPL_USDT, PLTR, .INX, 7203.T, TM, 005930, BTCUSDT, 黄金"></textarea>
     <div class="modal-err" id="coverErr"></div>
     <div class="modal-actions">
       <button class="act ghost" type="button" id="btnCoverClear">清空（用默认）</button>
@@ -1375,7 +1375,7 @@ async function setCryptoInterval(iv) {
     S.kbars = {};
     resetKlineQueue();
     renderAll();
-    toast("K线周期：" + intervalLabel(iv) + "。币/金/股票代币用 Gate 原生周期；无代币的指数用日K。请强制重扫");
+    toast("K线周期：" + intervalLabel(iv) + "。币/金/股票代币用 Gate 原生周期；无代币美股用新浪分钟K；日韩正股用日K。请强制重扫");
   } catch (e) { toast("周期保存失败"); }
 }
 

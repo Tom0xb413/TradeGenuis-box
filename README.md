@@ -7,7 +7,7 @@
 ## 产品特性
 
 - **A股全市场扫描**：沪深 5000+ 只逐一深度计算，无粗筛（`--market`），也可量比粗筛快扫（`--quick`）
-- **全市场标的扫描**：USDT 永续涨幅前 **20** + 黄金（Gate `XAUT_USDT`）+ 美/日/韩指数与龙头。有 Gate **股票代币** 的标的走原生 4h/8h/1d（跟踪正股、有基差，非交易所官方行情）；无代币则 Sina/Naver 日K。覆盖池可点顶栏「覆盖」编辑。详见 [docs/crypto-global-pool.md](docs/crypto-global-pool.md)
+- **全市场标的扫描**：USDT 永续涨幅前 **20** + 黄金（Gate `XAUT_USDT`）+ 美/日/韩指数与龙头。有 Gate **股票代币** 的标的走原生 4h/8h/1d（跟踪正股、有基差，非交易所官方行情）；无代币的美股走新浪分钟K，日韩正股走 Sina/Naver 日K。覆盖池可点顶栏「覆盖」编辑。详见 [docs/crypto-global-pool.md](docs/crypto-global-pool.md)
 - **四条件机械打分**（A股各 25 分，≥85 达标）：
   1. 热点题材 —— 当日涨幅前 3 概念板块 + 用户自定义关注板块
   2. 倍量启动 ≥3 日 —— 量 ≥ 前 5 日均量 1.8 倍连续计数
@@ -35,7 +35,7 @@
 - **零数据库、零 API Key**：全部依赖公开接口（腾讯/新浪/东方财富/Binance/Gate.io，东财失败时 AKShare 降级），结果即 JSON 文件
 - **本 fork 增强**（相对上游）：
   - 新浪全市场名单改为 `sh_a` + `sz_a` 分市场拉取（不用 `hs_a`），收盘后价格回退结算价——国内 VPS 上验证过
-  - 全市场标的：Binance 主源，失败后**粘性**回退 Gate.io USDT 永续；黄金优先 `XAUT_USDT`；美/日/韩有代币走 Gate 股票代币（非官方正股），否则新浪/Naver 日K（勿依赖 Yahoo）
+  - 全市场标的：Binance 主源，失败后**粘性**回退 Gate.io USDT 永续；黄金优先 `XAUT_USDT`；美/日/韩有代币走 Gate 股票代币（非官方正股），无代币美股走新浪分钟K，日韩走 Naver/Sina 日K（勿依赖 Yahoo）
   - 东财 push2 全挂时经 AKShare 走新浪概念/交易所官方名单/资金流等非 push2 接口，扫描尽量完成而非中止
   - 看板「全市场扫描 / 全市场标的扫描」默认使用 **1 小时结果缓存**；「强制重扫」或交易日 11:30/15:00 调度会绕过缓存
   - 扫描默认 16 线程（`scan_workers` / `SCAN_WORKERS`，钳制 4–32）；多浏览器共享同一条 `scan_progress` 进度条
@@ -69,7 +69,7 @@ python3 scanner.py --crypto     # 全市场标的：永续涨幅前 20 + 黄金 
 python3 scanner.py              # 自选池（data/pool.json）
 ```
 
-看板顶部横幅可一键切换 **A股 / 全市场标的** 两个 tab；扫描按钮随 tab 自动切换目标市场。全市场标的 Tab 为全球混合池（币 TOP20 + 黄金 + 美/日/韩）。币走 Binance，超时粘性 Gate；股票有 Gate 代币则用代币 K 线（4h/8h/1d），否则新浪/Naver 日K。顶栏「覆盖」可配置覆盖池。周期胶囊 **4h / 8h / 1日** 写入 `crypto_interval`。
+看板顶部横幅可一键切换 **A股 / 全市场标的** 两个 tab；扫描按钮随 tab 自动切换目标市场。全市场标的 Tab 为全球混合池（币 TOP20 + 黄金 + 美/日/韩）。币走 Binance，超时粘性 Gate；股票有 Gate 代币则用代币 K 线（4h/8h/1d），无代币美股用新浪分钟K，日韩正股用日K。顶栏「覆盖」可配置覆盖池。周期胶囊 **4h / 8h / 1日** 写入 `crypto_interval`。
 
 ### 扫描并发 `scan_workers`
 
@@ -119,7 +119,7 @@ python3 scanner.py --push        # 扫描并推送
 | `docs/pattern-high-flag.md` | 高位旗形参数与 Bull Flag / 杯柄 / 突破中继 |
 | `docs/pattern-trendline.md` | 趋势线参数与 Tom 图例（价格×时间边界） |
 | `global_pool.py` | 全球池常量、Gate 股票代币映射、覆盖池 |
-| `equity_sources.py` | 无代币时的美/日/韩日K（Sina / Naver） |
+| `equity_sources.py` | 无代币时的美股分钟K/日K、日韩日K（Sina / Naver） |
 | `docs/crypto-global-pool.md` | 全球池宇宙、Gate 代币、覆盖池、周期规则 |
 | `data/pool.json` | 自选池（`code` 必填） |
 | `data/sectors.json` | 用户自定义关注板块 |
