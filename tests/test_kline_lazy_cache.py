@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
 
 import scanner as sc  # noqa: E402
 import server  # noqa: E402
+import kline_store as ks  # noqa: E402
 
 DASH = ROOT / "dashboard.html"
 
@@ -155,9 +156,12 @@ class KlineCacheTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.disk = Path(self.tmp.name)
+        self.db = Path(self.tmp.name) / "kline_store.sqlite"
         server.STATE["kline_cache"] = {}
+        ks.reset_schema_cache()
         self.patches = [
             patch.object(server, "KLINE_DISK_DIR", self.disk),
+            patch.object(ks, "DB_PATH", self.db),
             patch.object(sc, "fetch_quote", side_effect=lambda code: _quote(code)),
         ]
         for p in self.patches:
@@ -289,7 +293,9 @@ class KlineHttpCacheTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.disk = Path(self.tmp.name)
+        self.db = Path(self.tmp.name) / "kline_store.sqlite"
         server.STATE["kline_cache"] = {}
+        ks.reset_schema_cache()
         self.calls = {"n": 0}
 
         def fake_kline(code, lmt=160):
@@ -298,6 +304,7 @@ class KlineHttpCacheTest(unittest.TestCase):
 
         self.patches = [
             patch.object(server, "KLINE_DISK_DIR", self.disk),
+            patch.object(ks, "DB_PATH", self.db),
             patch.object(sc, "fetch_quote", side_effect=lambda code: _quote(code)),
             patch.object(sc, "fetch_kline", side_effect=fake_kline),
         ]

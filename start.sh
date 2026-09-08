@@ -21,10 +21,10 @@ fi
 PORT="${PORT:-8808}"
 HOST="${HOST:-127.0.0.1}"
 
-# 2) 首次数据引导（可选，注释掉则首次打开后在页面点「全市场扫描」）
+# 2) 首次不再自动跑 A 股全市场（体量太大，且不进 180 根 K 线库）
+#    全市场标的由 server 启动后约 25s 后台增量同步；A 股请在看板「标的/数据」里手动扫描。
 if [ ! -f data/watchlist.json ]; then
-  echo "⏳ 首次运行，后台启动一次全市场扫描…"
-  nohup $PY scanner.py --market >/tmp/tradegenuis_first_scan.log 2>&1 &
+  echo "ℹ️  无 data/watchlist.json：A 股页将为空，可在「标的/数据」中「立即扫描 A 股」。"
 fi
 
 # 3) 启动看板服务

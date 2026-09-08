@@ -9,18 +9,22 @@ TradeGenuis · 箱体突破 本地看板服务器
 接口：
   GET  /                    看板页
   GET  /api/watchlist       最近一次 A 股扫描结果（磁盘缓存）
-  GET  /api/crypto          最近一次全市场标的扫描结果（磁盘缓存）
+  GET  /api/crypto          最近一次全市场标的分析结果（data/crypto.json，后台写入）
   GET  /api/pool            自选池
   POST /api/pool            增删自选池
-  GET  /api/kline?code=     个股日K（含箱体/试盘；成功结果约 45 分钟内存+磁盘缓存）
-  POST /api/scan            触发扫描 {mode, force}；1 小时内默认返回缓存。
-                            已在扫描时返回 {status:running, scan_progress}（加入当前任务，不开第二轮）
-  GET  /api/status          扫描状态：scanning + scan_progress + 最近 scan_log
-  GET/POST /api/config      配置（自动扫描 / Telegram / box_mode / pattern_family / scan_workers / crypto_interval）
-  GET/POST /api/global_pool/override  覆盖标的池 读取/保存/清空
-  POST /api/global_pool/validate      校验覆盖符号 {symbols:[]}
+  GET  /api/kline?code=     个股日K 或全市场标的（优先本地 kline_store）
+  POST /api/scan            A 股扫描 {mode, force}；crypto 改为本地库同步+分析
+  GET  /api/status          扫描/同步状态
+  GET/POST /api/config      配置（含 kline_sync_hours）
+  GET/POST /api/global_pool/override  覆盖标的池
+  POST /api/global_pool/validate      校验符号
+  GET  /api/kline_store/status         滚动库总览与每票拉取状态
+  GET/POST /api/kline_store/pool      维护池增删改源
+  POST /api/kline_store/sync           立即增量同步 K 线
+  POST /api/kline_store/analyze         立即用库存 K 线分析
 
-自动扫描调度：config.auto 开启时，每个交易日 11:30 与 15:00 自动执行全市场扫描（绕过 1h 缓存）。
+A 股自动扫描：config.auto 开启时，每个交易日 11:30 与 15:00。
+全市场标的：启动后错开一轮，之后每 kline_sync_hours（默认 4）小时增量同步并分析。
 """
 from __future__ import annotations
 
@@ -37,6 +41,8 @@ from urllib.parse import unquote
 
 import scanner as sc
 import global_pool as gp
+import kline_store as ks
+import sync_worker as sw
 
 ROOT = Path(__file__).resolve().parent
 WATCH_FILE = ROOT / "data" / "watchlist.json"
@@ -52,6 +58,7 @@ DEFAULT_CONFIG = {
     "pattern_family": "box",            # box | high_flag | trendline（默认 box，不打断现有用户）
         "crypto_interval": "1d",            # 全市场标的 Tab K 线/扫描周期：4h | 8h | 1d
     "scan_workers": sc.SCAN_WORKERS_DEFAULT,  # 4–32，亦可用环境变量 SCAN_WORKERS
+    "kline_sync_hours": sw.DEFAULT_SYNC_HOURS,  # 全市场标的后台增量同步间隔（小时）
 }
 
 
@@ -129,6 +136,11 @@ def configured_pattern_family() -> str:
 def configured_crypto_interval() -> str:
     with LOCK:
         return sc.normalize_crypto_interval(STATE["config"].get("crypto_interval"))
+
+
+def configured_kline_sync_hours() -> int:
+    with LOCK:
+        return sw.clamp_sync_hours(STATE["config"].get("kline_sync_hours"))
 
 
 def attach_cache_meta(payload: dict | None, *, from_cache: bool) -> dict:
@@ -390,6 +402,8 @@ def load_config() -> None:
                     STATE["config"].get("scan_workers"))
                 STATE["config"]["crypto_interval"] = sc.normalize_crypto_interval(
                     STATE["config"].get("crypto_interval"))
+                STATE["config"]["kline_sync_hours"] = sw.clamp_sync_hours(
+                    STATE["config"].get("kline_sync_hours"))
     except Exception:
         pass
 
@@ -404,6 +418,9 @@ def save_config(cfg: dict) -> None:
     if "crypto_interval" in incoming:
         incoming["crypto_interval"] = sc.normalize_crypto_interval(
             incoming.get("crypto_interval"))
+    if "kline_sync_hours" in incoming:
+        incoming["kline_sync_hours"] = sw.clamp_sync_hours(
+            incoming.get("kline_sync_hours"))
     if "scan_workers" in incoming:
         incoming["scan_workers"] = sc.clamp_scan_workers(incoming.get("scan_workers"))
     with LOCK:
@@ -425,6 +442,68 @@ def launch_scan_thread(mode: str, top: int = sc.MARKET_TOP, force: bool = False)
         daemon=True,
     ).start()
     return True
+
+
+def kline_job_worker(kind: str, symbols=None, retry_failed: bool = False) -> None:
+    """后台：sync / analyze / both。kind 写入 scan_progress.mode 供进度条。"""
+    mode = "crypto"
+    with LOCK:
+        if not STATE["scanning"]:
+            begin_scan_progress(mode)
+        sp = STATE.get("scan_progress") or {}
+        sp["message"] = "本地分析启动…" if kind == "analyze" else "K线同步启动…"
+    with sw._JOB_LOCK:
+        sw._JOB["running"] = True
+        sw._JOB["kind"] = kind
+    msg = "完成"
+    ok = False
+    cb = make_scan_progress_cb()
+    workers = sc.resolve_scan_workers(None)
+    try:
+        if kind == "analyze":
+            payload = sw.analyze_from_store(progress=cb, workers=workers)
+            rows = payload.get("candidates") or []
+            msg = f"本地分析完成：{len(rows)} 只，达标 {sum(1 for r in rows if r.get('qualified'))} 只"
+        elif kind == "sync":
+            res = sw.sync_symbols(symbols=symbols, retry_failed=retry_failed,
+                                  progress=cb, workers=workers)
+            msg = f"K线同步完成：成功 {res.get('ok_count')} / 失败 {res.get('error_count')}"
+        else:
+            out = sw.run_sync_and_analyze(
+                progress=cb, workers=workers, symbols=symbols, retry_failed=retry_failed)
+            rows = list((out.get("analysis") or {}).get("candidates") or [])
+            msg = f"K线同步并分析完成：{len(rows)} 只，达标 {sum(1 for r in rows if r.get('qualified'))} 只"
+        log(msg)
+        ok = True
+    except Exception as e:
+        msg = f"K线任务失败: {e}"
+        log(msg)
+    finally:
+        with sw._JOB_LOCK:
+            sw._JOB["running"] = False
+            sw._JOB["kind"] = None
+        finish_scan_progress(ok, msg)
+
+
+def start_or_join_kline_job(kind: str, symbols=None, retry_failed: bool = False) -> dict:
+    """配置 UI 立即同步/分析：已在跑则加入。"""
+    with LOCK:
+        if STATE["scanning"]:
+            return join_scan_payload()
+        begin_scan_progress("crypto")
+        progress = snapshot_scan_progress()
+    log("手动触发" + ("本地分析" if kind == "analyze" else "K线同步") + "…")
+    threading.Thread(
+        target=kline_job_worker,
+        kwargs={"kind": kind, "symbols": symbols, "retry_failed": retry_failed},
+        daemon=True,
+    ).start()
+    return {
+        "status": "started",
+        "from_cache": False,
+        "scanning": True,
+        "scan_progress": progress,
+    }
 
 
 def start_or_join_scan(mode: str, top: int = sc.MARKET_TOP, force: bool = False) -> dict:
@@ -483,10 +562,14 @@ def scan_worker(mode: str = "pool", top: int = sc.MARKET_TOP, force: bool = Fals
             rows = sc.run_market_scan(full=False, top=top, progress=cb, workers=workers,
                                       force_universe=force)
         elif mode == "crypto":
-            rows = sc.run_crypto_scan(top=sc.CRYPTO_TOP_N, progress=cb, workers=workers)
+            out = sw.run_sync_and_analyze(progress=cb, workers=workers)
+            rows = list((out.get("analysis") or {}).get("candidates") or [])
         else:
             rows = sc.run_scan(network=True, progress=cb, workers=workers)
-        msg = f"扫描完成：{len(rows)} 只，达标 {sum(1 for r in rows if r.get('qualified'))} 只"
+        if mode == "crypto":
+            msg = f"K线同步并分析完成：{len(rows)} 只，达标 {sum(1 for r in rows if r.get('qualified'))} 只"
+        else:
+            msg = f"扫描完成：{len(rows)} 只，达标 {sum(1 for r in rows if r.get('qualified'))} 只"
         log(msg)
         ok = True
     except Exception as e:
@@ -670,38 +753,71 @@ def _with_box(payload: dict) -> dict:
     return out
 
 
+def _crypto_payload_from_bars(code: str, bars: list, interval: str, extra: dict | None = None) -> dict:
+    """用本地（或刚拉取的）bars 组装 /api/kline 的 crypto payload。"""
+    extra = extra or {}
+    px = extra.get("price")
+    if px is None:
+        px = bars[-1]["close"]
+    chg = extra.get("chg")
+    if chg is None and len(bars) >= 2 and bars[-2]["close"]:
+        try:
+            chg = (bars[-1]["close"] - bars[-2]["close"]) / bars[-2]["close"] * 100.0
+        except (TypeError, ZeroDivisionError):
+            chg = None
+    ident = gp.resolve_symbol(code) or {}
+    meta = ks.get_symbol_row(code) or {}
+    return {
+        "code": extra.get("code") or ident.get("code") or code,
+        "name": extra.get("name") or meta.get("name") or ident.get("name") or code,
+        "price": px, "chg": chg,
+        "turnover": None, "volume_ratio": None,
+        "bar_date": bars[-1]["date"], "bars": bars,
+        "crypto_interval": interval,
+        "interval_note": extra.get("interval_note"),
+        "interval_limited": bool(extra.get("interval_limited")),
+        "source": extra.get("source") or meta.get("source") or ident.get("source"),
+        "asset_class": extra.get("asset_class") or meta.get("asset_class") or ident.get("asset_class"),
+        "tokenized": bool(extra.get("tokenized") or ident.get("tokenized")),
+        "gate_contract": extra.get("gate_contract") or ident.get("gate_contract"),
+        "from_store": True,
+        "bars_as_of": bars[-1]["date"],
+    }
+
+
 def get_kline(code: str, lmt: int = 160, market: str = "stock") -> dict | None:
-    """个股/币/全球池 K 线 + 箱体。成功结果缓存 ~45 分钟；错误与空序列不写入。
-    全市场标的 Tab 使用配置中的 crypto_interval，缓存键含周期以免 4h/1d 串用。"""
+    """个股/币/全球池 K 线 + 箱体。
+    全市场标的优先读本地滚动库（最多 180 根）；仅缺数据时一次性回填。
+    A 股仍走 ~45 分钟内存+磁盘缓存，不进 kline_store。"""
     interval = configured_crypto_interval() if market == "crypto" else ""
     hit = _kline_mem_get(market, code, interval)
     if hit:
         return _with_box(hit)
+    if market == "crypto":
+        try:
+            stored = ks.get_bars(code, interval, cap=ks.BAR_CAP)
+        except Exception:
+            stored = []
+        if stored:
+            payload = _crypto_payload_from_bars(code, stored, interval)
+            _kline_mem_put(market, code, payload, interval)
+            return _with_box(payload)
     hit = _kline_disk_get(market, code, interval)
     if hit:
         _kline_mem_put(market, code, hit, interval)
         return _with_box(hit)
     try:
         if market == "crypto":
-            inst = sc.fetch_global_instrument(code, interval=interval, lookback=sc.CRYPTO_LOOKBACK)
+            inst = sc.fetch_global_instrument(code, interval=interval, lookback=ks.BAR_CAP)
             bars = list((inst or {}).get("bars") or [])
             if not bars:
                 return {"code": code, "error": "empty kline"}
-            payload = {
-                "code": (inst or {}).get("code") or code,
-                "name": (inst or {}).get("name") or code,
-                "price": (inst or {}).get("price") if (inst or {}).get("price") is not None else bars[-1]["close"],
-                "chg": (inst or {}).get("chg"),
-                "turnover": None, "volume_ratio": None,
-                "bar_date": bars[-1]["date"], "bars": bars,
-                "crypto_interval": interval,
-                "interval_note": (inst or {}).get("interval_note"),
-                "interval_limited": bool((inst or {}).get("interval_limited")),
-                "source": (inst or {}).get("source"),
-                "asset_class": (inst or {}).get("asset_class"),
-                "tokenized": bool((inst or {}).get("tokenized")),
-                "gate_contract": (inst or {}).get("gate_contract"),
-            }
+            try:
+                ks.replace_bars(code, interval, bars, cap=ks.BAR_CAP)
+            except Exception:
+                pass
+            payload = _crypto_payload_from_bars(code, bars, interval, extra=inst or {})
+            payload["from_store"] = False
         else:
             quote = sc.fetch_quote(code)
             bars = sc.fetch_kline(code, lmt=lmt)
@@ -778,6 +894,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json(attach_cache_meta(raw, from_cache=bool(raw.get("candidates") or raw.get("items"))))
         elif p == "/api/crypto":
             raw = read_json(sc.CRYPTO_FILE, {"as_of": None, "updated": None, "candidates": [], "items": []})
+            if not raw.get("analysis_as_of"):
+                raw["analysis_as_of"] = raw.get("updated") or raw.get("as_of")
+            if not raw.get("bars_as_of"):
+                try:
+                    raw["bars_as_of"] = ks.bars_as_of(configured_crypto_interval())
+                except Exception:
+                    pass
             self._json(attach_cache_meta(raw, from_cache=bool(raw.get("candidates") or raw.get("items"))))
         elif p == "/api/hot":
             hot, _ = sc.fetch_hot_topics()
@@ -792,6 +915,7 @@ class Handler(BaseHTTPRequestHandler):
             cfg["box_mode"] = sc.normalize_box_mode(cfg.get("box_mode"))
             cfg["pattern_family"] = sc.normalize_pattern_family(cfg.get("pattern_family"))
             cfg["crypto_interval"] = sc.normalize_crypto_interval(cfg.get("crypto_interval"))
+            cfg["kline_sync_hours"] = sw.clamp_sync_hours(cfg.get("kline_sync_hours"))
             cfg["scan_workers"] = sc.clamp_scan_workers(cfg.get("scan_workers"))
             cfg["box_modes"] = list(sc.BOX_MODES)
             cfg["pattern_families"] = list(sc.PATTERN_FAMILIES)
@@ -814,6 +938,24 @@ class Handler(BaseHTTPRequestHandler):
             self._json(get_kline(code, lmt, market))
         elif p == "/api/global_pool/override":
             self._json(override_payload())
+        elif p == "/api/kline_store/status":
+            self._json(sw.status_payload(
+                interval=configured_crypto_interval(),
+                hours=configured_kline_sync_hours(),
+            ))
+        elif p == "/api/kline_store/pool":
+            st = sw.status_payload(
+                interval=configured_crypto_interval(),
+                hours=configured_kline_sync_hours(),
+            )
+            self._json({
+                "mode": st.get("pool_mode"),
+                "count": st.get("pool_count"),
+                "default_source": st.get("default_source"),
+                "source_choices": st.get("source_choices"),
+                "symbols": st.get("symbols") or [],
+                **(st.get("override") or {}),
+            })
         else:
             self._json({"error": "not found"}, 404)
 
@@ -839,6 +981,7 @@ class Handler(BaseHTTPRequestHandler):
             cfg["box_mode"] = sc.normalize_box_mode(cfg.get("box_mode"))
             cfg["pattern_family"] = sc.normalize_pattern_family(cfg.get("pattern_family"))
             cfg["crypto_interval"] = sc.normalize_crypto_interval(cfg.get("crypto_interval"))
+            cfg["kline_sync_hours"] = sw.clamp_sync_hours(cfg.get("kline_sync_hours"))
             cfg["scan_workers"] = sc.clamp_scan_workers(cfg.get("scan_workers"))
             self._json({"ok": True, "config": cfg})
         elif p == "/api/pool":
@@ -905,11 +1048,72 @@ class Handler(BaseHTTPRequestHandler):
                 "rejected": result["bad"],
                 **override_payload(),
             })
+        elif p == "/api/kline_store/sync":
+            body = self._body()
+            symbols = body.get("symbols")
+            if isinstance(symbols, str):
+                symbols = gp.parse_symbol_text(symbols)
+            elif isinstance(symbols, list):
+                symbols = [str(x).strip() for x in symbols if str(x).strip()]
+            else:
+                symbols = None
+            retry = as_truthy(body.get("retry_failed"))
+            skip_an = as_truthy(body.get("skip_analyze"))
+            kind = "sync" if skip_an else "both"
+            self._json(start_or_join_kline_job(
+                kind, symbols=symbols or None, retry_failed=retry))
+        elif p == "/api/kline_store/analyze":
+            self._json(start_or_join_kline_job("analyze"))
+        elif p == "/api/kline_store/pool":
+            body = self._body()
+            result = sw.apply_pool_action(
+                body.get("action") or "add",
+                symbols=body.get("symbols"),
+                source=body.get("source"),
+                default_source=body.get("default_source"),
+                code=body.get("code"),
+            )
+            if result.get("error") and not result.get("ok"):
+                self._json(result, 400)
+                return
+            log("标的池已更新")
+            st = sw.status_payload(
+                interval=configured_crypto_interval(),
+                hours=configured_kline_sync_hours(),
+            )
+            self._json({
+                **st,
+                "ok": result.get("ok", True),
+                "saved": result.get("saved"),
+                "rejected": result.get("rejected") or [],
+                "cleared": result.get("cleared"),
+            })
         else:
             self._json({"error": "not found"}, 404)
 
     def log_message(self, fmt, *args):
         pass
+
+
+def kline_sync_loop() -> None:
+    """启动后错开约 25s 跑一轮，之后按 kline_sync_hours（默认 4）增量同步并分析。不阻塞 listen。"""
+    time.sleep(25)
+    first = True
+    while True:
+        try:
+            hours = configured_kline_sync_hours()
+            with LOCK:
+                busy = STATE["scanning"]
+            due = first or sw.sync_is_due(hours)
+            if due and not busy:
+                if launch_scan_thread("crypto"):
+                    first = False
+                    log(f"后台K线同步触发（每 {hours} 小时，周期 {configured_crypto_interval()}）…")
+            elif not busy:
+                first = False
+        except Exception:
+            pass
+        time.sleep(20)
 
 
 def main() -> int:
@@ -919,11 +1123,14 @@ def main() -> int:
     args = ap.parse_args()
 
     load_config()
-    log(f"自动扫描：{'开' if STATE['config'].get('auto') else '关'} · "
+    log(f"自动扫描（A股）：{'开' if STATE['config'].get('auto') else '关'} · "
         f"{' / '.join(STATE['config'].get('auto_times') or [])} 每个交易日")
+    log(f"K线后台同步：每 {configured_kline_sync_hours()} 小时 · 周期 {configured_crypto_interval()} · 最多 {ks.BAR_CAP} 根")
     if not WATCH_FILE.exists():
-        log("未发现 data/watchlist.json，启动后台首次全市场扫描…")
-        launch_scan_thread("market")
+        log("未发现 data/watchlist.json；A 股页只读上次结果。不自动把全市场 A 股写入 180 根 K 线库。")
+
+    threading.Thread(target=scheduler_loop, daemon=True).start()
+    threading.Thread(target=kline_sync_loop, daemon=True).start()
 
     threading.Thread(target=scheduler_loop, daemon=True).start()
 

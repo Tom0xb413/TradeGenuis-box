@@ -218,6 +218,30 @@
       width: min(520px, 100%); background: var(--pop); border: 1px solid var(--card-border);
       border-radius: var(--r); padding: 16px 18px 14px; box-shadow: 0 16px 40px rgba(0,0,0,.35);
     }
+    .modal.wide { width: min(960px, 100%); max-height: min(88vh, 900px); overflow: auto; }
+    .store-status {
+      display: flex; flex-wrap: wrap; gap: 8px 14px; font-size: 12px; color: var(--ink-dim);
+      background: var(--chip); border-radius: 12px; padding: 8px 12px; margin-bottom: 12px;
+    }
+    .store-status b { color: var(--ink); font-weight: 600; }
+    .store-status .err { color: var(--down); }
+    .store-add { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+    .store-add input, .store-add select, .store-hours {
+      border: 1px solid var(--card-border); border-radius: 999px; background: var(--chip);
+      padding: 6px 12px; font-size: 12px; font-family: var(--mono); color: var(--ink); outline: none;
+    }
+    .store-add input { flex: 1; min-width: 160px; }
+    .store-table-wrap { overflow: auto; max-height: 320px; border: 1px solid var(--card-border); border-radius: 12px; }
+    .store-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .store-table th, .store-table td { padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+    .store-table th { color: var(--ink-faint); font-weight: 500; position: sticky; top: 0; background: var(--pop); }
+    .store-table select { background: var(--chip); color: var(--ink); border: 1px solid var(--card-border); border-radius: 8px; padding: 3px 6px; }
+    .store-table .st-ok { color: var(--up); }
+    .store-table .st-err { color: var(--down); }
+    .store-table .st-pending { color: var(--ink-faint); }
+    .store-table .del { cursor: pointer; color: var(--ink-faint); border: none; background: transparent; }
+    .store-table .del:hover { color: var(--down); }
+    .ash-note { font-size: 11.5px; color: var(--ink-faint); margin: 8px 0 0; line-height: 1.5; }
     .modal h4 { font-size: 14px; margin-bottom: 6px; }
     .modal .hint { font-size: 12px; color: var(--ink-dim); margin-bottom: 10px; line-height: 1.55; }
     .modal textarea {
@@ -250,13 +274,13 @@
   <div class="banner">
     <div class="brand"><span class="wordmark">TradeGenuis</span><span class="b-sub">箱体突破</span></div>
     <span class="pill"><span class="k" id="hpHitLabel">达标</span><b class="num" id="hpHit">—</b></span>
-    <span class="pill pill-edit" id="hpCoverWrap" title="点击配置全市场标的覆盖池" role="button" tabindex="0">
-      <span class="k">覆盖</span><b class="num" id="hpCover">—</b>
+    <span class="pill pill-edit" id="hpCoverWrap" title="标的池、数据源与 K 线同步状态" role="button" tabindex="0">
+      <span class="k">标的/数据</span><b class="num" id="hpCover">—</b>
     </span>
     <label class="pill autodrop" title="每个交易日午间收盘与收盘自动全市场扫描">
       <input type="checkbox" id="autoCb" /><span>自动扫描</span><span class="mode-tag" id="autoTimes">11:30 / 15:00</span>
     </label>
-    <div class="box-mode" id="familyWrap" title="识别目标：箱体/通道、高位旗形或趋势线。切换后请强制重扫">
+    <div class="box-mode" id="familyWrap" title="识别目标：箱体/通道、高位旗形或趋势线。切换后请在「标的/数据」中立即分析">
       <span class="k">形态</span>
       <div class="tabs" id="familyTabs">
         <button class="tab on" data-family="box" type="button">箱体/通道</button>
@@ -264,7 +288,7 @@
         <button class="tab" data-family="trendline" type="button">趋势线</button>
       </div>
     </div>
-    <div class="box-mode" id="boxModeWrap" title="箱体识别模式：切换后 K 线箱体立即按新规则绘制，评分需强制重扫">
+    <div class="box-mode" id="boxModeWrap" title="箱体识别模式：切换后 K 线箱体立即按新规则绘制，评分请在「标的/数据」中立即分析">
       <span class="k">箱体模式</span>
       <div class="tabs" id="boxModeTabs">
         <button class="tab on" data-box-mode="classic" type="button">经典</button>
@@ -272,7 +296,7 @@
         <button class="tab" data-box-mode="p1" type="button" title="斜向通道：OLS 中轴 + 残差分位数 + ADX">P1通道</button>
       </div>
     </div>
-    <div class="box-mode" id="cryptoIntervalWrap" title="全市场标的 K 线周期。币/金/股票代币用 Gate 原生 4h/8h/1d；无代币的美股/美指用新浪分钟K；日韩正股无代币则日K。切换后请强制重扫" style="display:none">
+    <div class="box-mode" id="cryptoIntervalWrap" title="全市场标的 K 线周期。币/金/股票代币用 Gate 原生 4h/8h/1d；无代币的美股/美指用新浪分钟K；日韩正股无代币则日K。切换后请在「标的/数据」中立即同步并分析" style="display:none">
       <span class="k">周期</span>
       <div class="tabs" id="cryptoIntervalTabs">
         <button class="tab" data-interval="4h" type="button">4h</button>
@@ -312,8 +336,6 @@
       <button class="tab on" data-market="stock" type="button">A股</button>
       <button class="tab" data-market="crypto" type="button">全市场标的</button>
     </div>
-    <button class="act go" id="btnScan" type="button">全市场扫描</button>
-    <button class="act ghost" id="btnForceScan" type="button" title="忽略1小时缓存，重新全量扫描" style="display:none">强制重扫</button>
   </div>
 
   <div class="scan-progress" id="scanProgress" hidden>
@@ -339,22 +361,52 @@
 </div>
 <div class="toast" id="toast"></div>
 <div class="modal-bg" id="coverModal" hidden>
-  <div class="modal" role="dialog" aria-labelledby="coverModalTitle">
-    <h4 id="coverModalTitle">覆盖标的池</h4>
-    <p class="hint">逗号或换行分隔。非空时扫描<b>只扫这些标的</b>；清空则恢复默认混合池（币 TOP20 + 黄金 XAUT + 美股20 Gate 永续 + SPX500/SPY/QQQ/IWM + 索尼/三星代币代理 + 日经/KOSPI 日K）。美股优先校验 Gate <b>USDT 永续干净名</b>（AAPL 或 AAPL_USDT → AAPL_USDT；<b>代币化加密市场，非纽交所官方打印</b>）；现货 *X/*G/*ON 仅回退，不用 3L/3S。日韩 Gate 标的为<b>代币代理</b>。</p>
-    <textarea id="coverSymbols" placeholder="AAPL, AAPL_USDT, SPY, SPX500, PLTR, 6758.T, SAMSUNG, 005930, BTCUSDT, 黄金"></textarea>
+  <div class="modal wide" role="dialog" aria-labelledby="coverModalTitle">
+    <h4 id="coverModalTitle">标的 / 数据配置</h4>
+    <p class="hint">维护全市场标的池与数据源（Gate 代币/永续、新浪 MinK、Naver）。后台每 <b id="cfgSyncHoursLab">4</b> 小时增量拉取 K 线（每票每周期最多 180 根）并自动分析。看板只读上次结果，不再在主页全量扫描。<b>股票代币是代币化加密市场，非纽交所官方打印</b>（AAPL / AAPL_USDT → AAPL_USDT）。A 股<b>不会</b>自动写入滚动库。</p>
+    <div class="store-status" id="storeStatusStrip">加载状态…</div>
+    <div class="store-add">
+      <input id="storeAddInput" placeholder="添加：AAPL, AAPL_USDT, BTCUSDT, 黄金, SPX500" />
+      <select id="storeAddSource" title="新增标的数据源">
+        <option value="auto">源：自动</option>
+        <option value="gate">Gate 代币/永续</option>
+        <option value="crypto">币所永续</option>
+        <option value="sina">新浪 MinK/日K</option>
+        <option value="naver">Naver 日K</option>
+      </select>
+      <button class="act go" type="button" id="btnStoreAdd">添加</button>
+      <label class="mode-tag">同步间隔
+        <input class="store-hours" id="storeSyncHours" type="number" min="1" max="24" value="4" style="width:64px" />
+        小时
+      </label>
+    </div>
+    <div class="store-table-wrap">
+      <table class="store-table" id="storeTable">
+        <thead>
+          <tr>
+            <th>代码</th><th>名称</th><th>类别</th><th>数据源</th>
+            <th>K线</th><th>上次拉取</th><th>状态</th><th></th>
+          </tr>
+        </thead>
+        <tbody id="storeTableBody"></tbody>
+      </table>
+    </div>
     <div class="modal-err" id="coverErr"></div>
+    <p class="ash-note">A 股：主页只加载上次 <code>watchlist.json</code>。全市场 5000+ 不进 180 根库。需要时点下方「立即扫描 A 股」。</p>
     <div class="modal-actions">
-      <button class="act ghost" type="button" id="btnCoverClear">清空（用默认）</button>
-      <button class="act ghost" type="button" id="btnCoverCancel">取消</button>
-      <button class="act go" type="button" id="btnCoverSave">保存并校验</button>
+      <button class="act ghost" type="button" id="btnAshScan">立即扫描 A 股</button>
+      <button class="act ghost" type="button" id="btnRetryFailed">清空失败重试</button>
+      <button class="act ghost" type="button" id="btnCoverClear">恢复默认池</button>
+      <button class="act ghost" type="button" id="btnStoreAnalyze">立即分析</button>
+      <button class="act go" type="button" id="btnStoreSync">立即同步K线</button>
+      <button class="act ghost" type="button" id="btnCoverCancel">关闭</button>
     </div>
   </div>
 </div>
 
 <script>
 "use strict";
-const S = { watch: null, crypto: null, status: null, cfg: null, hot: [], loaded: false, kbars: {}, market: "stock", selBoard: null, flagFilter: "all", tlFilter: "all", poolFilter: "all", override: { symbols: [], count: 0, mode: "default" } };
+const S = { watch: null, crypto: null, status: null, cfg: null, hot: [], loaded: false, kbars: {}, market: "stock", selBoard: null, flagFilter: "all", tlFilter: "all", poolFilter: "all", override: { symbols: [], count: 0, mode: "default" }, store: null };
 const $ = id => document.getElementById(id);
 const fmt2 = v => (v === null || v === undefined || isNaN(v)) ? "—" : Number(v).toFixed(2);
 const fmtc = v => (v === null || v === undefined || isNaN(v)) ? "—" : (v >= 1 ? Number(v).toFixed(2) : Number(v).toPrecision(4));
@@ -418,13 +470,17 @@ function hhmm(d) {
 }
 function cacheHintText(data) {
   if (!data || data.done === false) return "";
-  const ts = data.updated || data.as_of;
+  const ts = data.analysis_as_of || data.updated || data.as_of;
   const d = parseStamp(ts);
   if (!d) return "";
-  const age = (Date.now() - d.getTime()) / 1000;
   const when = hhmm(d);
-  if (age < 3600) return `缓存 · 更新于 ${when} · 1小时内不重复全量扫描`;
-  return `缓存 · 更新于 ${when} · 可强制重扫`;
+  if (S.market === "crypto") {
+    const bars = data.bars_as_of ? ` · K线截至 ${data.bars_as_of}` : "";
+    return `分析结果 · ${when}${bars}`;
+  }
+  const age = (Date.now() - d.getTime()) / 1000;
+  if (age < 3600) return `缓存 · 更新于 ${when}`;
+  return `缓存 · 更新于 ${when} · 可在「标的/数据」中扫描 A 股`;
 }
 function boxModeLabel(mode) {
   return { classic: "经典", p0: "P0增强", p1: "P1通道" }[mode] || "经典";
@@ -624,20 +680,18 @@ function renderAll() {
   const scanIv = data.crypto_interval || "1d";
   if (S.loaded && cfgFam !== scanFam && (rows.length || data.updated || data.as_of)) {
     hintText = (hintText ? hintText + " · " : "") +
-      `扫描结果来自「${familyLabel(scanFam)}」，当前为「${familyLabel(cfgFam)}」，请强制重扫以更新`;
+      `扫描结果来自「${familyLabel(scanFam)}」，当前为「${familyLabel(cfgFam)}」，请在「标的/数据」中立即分析以更新`;
   } else if (isCrypto && S.loaded && cfgIv !== scanIv && (rows.length || data.updated || data.as_of)) {
     hintText = (hintText ? hintText + " · " : "") +
-      `扫描结果来自「${intervalLabel(scanIv)}」，当前为「${intervalLabel(cfgIv)}」，请强制重扫以更新`;
+      `扫描结果来自「${intervalLabel(scanIv)}」，当前为「${intervalLabel(cfgIv)}」，请在「标的/数据」中立即分析以更新`;
   } else if (isCrypto && S.loaded && ((data.override_fingerprint || "") !== ((S.override && S.override.fingerprint) || "")) && (rows.length || data.updated || data.as_of)) {
     hintText = (hintText ? hintText + " · " : "") +
-      "覆盖池已变更，当前结果来自旧池，请强制重扫";
+      "标的池已变更，当前结果来自旧池，请在「标的/数据」中立即分析";
   } else if (S.loaded && cfgMode !== scanMode && (rows.length || data.updated || data.as_of)) {
     hintText = (hintText ? hintText + " · " : "") +
-      `评分来自「${boxModeLabel(scanMode)}」，当前为「${boxModeLabel(cfgMode)}」，请强制重扫以更新评分`;
+      `评分来自「${boxModeLabel(scanMode)}」，当前为「${boxModeLabel(cfgMode)}」，请在「标的/数据」中立即分析以更新评分`;
   }
   hint.textContent = hintText;
-  const forceBtn = $("btnForceScan");
-  if (forceBtn) forceBtn.style.display = (S.loaded && (rows.length || data.updated || data.as_of)) ? "" : "none";
   // A股：展示当前热门板块（可点击筛选）；接口限流则诚实提示
   const hotEl = $("hotTopics");
   if (!isCrypto) {
@@ -791,9 +845,18 @@ function renderCards(rows) {
       : currentFamily() === "trendline"
         ? (S.tlFilter === "support_break" ? "暂无刚跌破支撑"
           : S.tlFilter === "resistance_break" ? "暂无刚突破压力" : "暂无有效趋势线")
-      : (S.selBoard ? `该板块暂无股票` : "暂无数据");
-    box.innerHTML = `<div class="empty"><div class="big">NO SIGNAL</div><p>${emptyMsg}</p>
-      <button class="act go" type="button" onclick="doScan(false)">${isCrypto ? "全市场标的扫描" : "全市场扫描"}</button></div>`;
+      : (S.selBoard ? `该板块暂无股票` : (isCrypto ? "尚未同步分析结果" : "暂无数据"));
+    const data = isCrypto ? (S.crypto || {}) : (S.watch || {});
+    const neverSynced = isCrypto && !(data.analysis_as_of || data.as_of || data.updated);
+    const cta = isCrypto
+      ? `<button class="act go" type="button" onclick="openCoverModal()">打开标的/数据</button>`
+      : `<button class="act ghost" type="button" onclick="openCoverModal()">在配置中扫描 A 股</button>`;
+    const sub = neverSynced
+      ? "看板只读本地分析结果。请在「标的/数据」中配置池并立即同步 K 线。"
+      : (emptyMsg === "暂无数据"
+          ? "A 股主页只读上次 watchlist，全市场不进 180 根 K 线库。"
+          : emptyMsg);
+    box.innerHTML = `<div class="empty"><div class="big">NO SIGNAL</div><p>${sub}</p>${cta}</div>`;
     return;
   }
   // 币圈仍列出全部进池标的；K 线只在卡片进入视口附近才拉取（见 observeCardCharts）
@@ -1201,16 +1264,19 @@ async function refreshQuotes() {
 let localScanWait = false;
 let scanPollTimer = null;
 let scanWasRunning = false;
-function scanBtnLabel() {
-  return S.market === "crypto" ? "全市场标的扫描" : "全市场扫描";
-}
 function scanModeLabel(mode) {
-  return { market: "全市场扫描", quick: "全市场快扫", crypto: "全市场标的扫描", pool: "自选池扫描" }[mode] || "扫描";
+  return { market: "A股扫描", quick: "全市场快扫", crypto: "K线同步/分析", pool: "自选池扫描" }[mode] || "任务";
 }
 function isScanRunning(st) {
   if (!st) return false;
   const sp = st.scan_progress || {};
   return !!(st.scanning || sp.running);
+}
+function setStoreJobButtons(disabled) {
+  ["btnStoreSync", "btnStoreAnalyze", "btnAshScan", "btnRetryFailed", "btnStoreAdd"].forEach(id => {
+    const el = $(id);
+    if (el) el.disabled = !!disabled;
+  });
 }
 function renderScanProgress(st) {
   const bar = $("scanProgress");
@@ -1220,9 +1286,7 @@ function renderScanProgress(st) {
   if (!running && !localScanWait) {
     bar.hidden = true;
     bar.classList.remove("indeterminate");
-    $("btnScan").disabled = false;
-    $("btnForceScan").disabled = false;
-    $("btnScan").textContent = scanBtnLabel();
+    setStoreJobButtons(false);
     return;
   }
   bar.hidden = false;
@@ -1231,7 +1295,7 @@ function renderScanProgress(st) {
   const done = Number(sp.done || 0);
   $("scanProgressTitle").textContent = scanModeLabel(sp.mode) + (running ? "进行中" : "");
   $("scanProgressPct").textContent = total > 0 ? (Math.round(pct * 10) / 10) + "%" : "…";
-  $("scanProgressMsg").textContent = sp.message || (running ? "扫描中…" : "");
+  $("scanProgressMsg").textContent = sp.message || (running ? "进行中…" : "");
   $("scanProgressCount").textContent = total > 0 ? (done + " / " + total) : "";
   const fill = $("scanProgressFill");
   if (running && total <= 0) {
@@ -1241,9 +1305,7 @@ function renderScanProgress(st) {
     bar.classList.remove("indeterminate");
     fill.style.width = Math.max(0, Math.min(100, pct)) + "%";
   }
-  $("btnScan").disabled = true;
-  $("btnForceScan").disabled = true;
-  $("btnScan").textContent = "扫描中…";
+  setStoreJobButtons(true);
 }
 function ensureScanPoll() {
   const need = localScanWait || isScanRunning(S.status);
@@ -1265,8 +1327,9 @@ async function tickScanStatus() {
     if (was && !nowRun) {
       localScanWait = false;
       await refresh();
-      toast("扫描完成");
+      toast("任务完成");
       renderScanProgress(S.status);
+      if (!$("coverModal").hidden) loadStoreStatus();
     }
     ensureScanPoll();
   } catch (e) {}
@@ -1277,12 +1340,12 @@ async function doScan(force) {
     return;
   }
   localScanWait = true;
-  renderScanProgress(S.status || { scanning: true, scan_progress: { running: true, message: "正在请求扫描…" } });
+  renderScanProgress(S.status || { scanning: true, scan_progress: { running: true, message: "正在请求…" } });
   ensureScanPoll();
   try {
     const r = await jfetch("api/scan" + (force ? "?force=1" : ""), {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: S.market === "crypto" ? "crypto" : "market", force: !!force })
+      body: JSON.stringify({ mode: "market", force: !!force })
     });
     if (r.status === "running") {
       S.status = {
@@ -1297,10 +1360,10 @@ async function doScan(force) {
       localScanWait = false;
       if (S.market === "crypto") S.crypto = r; else S.watch = r;
       renderAll();
-      toast("缓存 · 1小时内未重复全量扫描");
+      toast("缓存 · 未重复全量扫描");
       ensureScanPoll();
     } else {
-      S.status = { scanning: true, scan_progress: r.scan_progress || { running: true, mode: S.market === "crypto" ? "crypto" : "market" } };
+      S.status = { scanning: true, scan_progress: r.scan_progress || { running: true, mode: "market" } };
       scanWasRunning = true;
       renderScanProgress(S.status);
       ensureScanPoll();
@@ -1323,9 +1386,9 @@ async function saveCfg() {
 }
 
 const BOX_MODE_TOAST = {
-  classic: "箱体模式：经典（窗口最高/最低）。K 线立即按此绘制；评分需强制重扫后更新",
-  p0: "箱体模式：P0 增强（分位数 + 振幅门控）。K 线立即按此绘制；评分需强制重扫后更新",
-  p1: "箱体模式：P1 通道（OLS 斜向通道）。K 线立即按此绘制；评分需强制重扫后更新",
+  classic: "箱体模式：经典（窗口最高/最低）。K 线立即按此绘制；评分请在「标的/数据」中立即分析",
+  p0: "箱体模式：P0 增强（分位数 + 振幅门控）。K 线立即按此绘制；评分请在「标的/数据」中立即分析",
+  p1: "箱体模式：P1 通道（OLS 斜向通道）。K 线立即按此绘制；评分请在「标的/数据」中立即分析",
 };
 
 async function setBoxMode(mode) {
@@ -1345,9 +1408,9 @@ async function setBoxMode(mode) {
 }
 
 const FAMILY_TOAST = {
-  box: "形态：箱体/通道。K 线按箱体绘制；评分需强制重扫后更新",
-  high_flag: "形态：高位旗形(杯柄)。请强制重扫以批量筛选旗面/二次买点",
-  trendline: "形态：趋势线。请强制重扫以筛选支撑/压力与刚跌破、刚突破",
+  box: "形态：箱体/通道。K 线按箱体绘制；评分请在「标的/数据」中立即分析",
+  high_flag: "形态：高位旗形(杯柄)。请在「标的/数据」中立即分析以批量筛选旗面/二次买点",
+  trendline: "形态：趋势线。请在「标的/数据」中立即分析以筛选支撑/压力与刚跌破、刚突破",
 };
 
 async function setPatternFamily(fam) {
@@ -1376,7 +1439,7 @@ async function setCryptoInterval(iv) {
     S.kbars = {};
     resetKlineQueue();
     renderAll();
-    toast("K线周期：" + intervalLabel(iv) + "。币/金/股票代币用 Gate 原生周期；无代币美股用新浪分钟K；日韩正股用日K。请强制重扫");
+    toast("K线周期：" + intervalLabel(iv) + "。请在「标的/数据」中立即同步并分析");
   } catch (e) { toast("周期保存失败"); }
 }
 
@@ -1408,55 +1471,153 @@ function switchMarket(market) {
   S.kbars = {};
   resetKlineQueue();
   if (market === "crypto") S.selBoard = null;   // 板块筛选仅 A股
-  $("btnScan").textContent = scanBtnLabel();
   renderAll();
 }
 
+function fmtLag(sec) {
+  if (sec == null || isNaN(sec)) return "—";
+  const s = Number(sec);
+  if (s < 90) return Math.round(s) + "s";
+  if (s < 3600) return Math.round(s / 60) + "m";
+  return (s / 3600).toFixed(1) + "h";
+}
+function sourceLabel(src) {
+  return { auto: "自动", gate: "Gate", crypto: "币所", sina: "新浪", naver: "Naver" }[src] || (src || "自动");
+}
+function renderStoreStatus(st) {
+  S.store = st;
+  if (st && st.override) S.override = st.override;
+  const hours = (st && st.kline_sync_hours) || (S.cfg && S.cfg.kline_sync_hours) || 4;
+  if ($("cfgSyncHoursLab")) $("cfgSyncHoursLab").textContent = hours;
+  if ($("storeSyncHours") && document.activeElement !== $("storeSyncHours")) {
+    $("storeSyncHours").value = hours;
+  }
+  const running = st && st.running;
+  const bits = [
+    `池 <b>${st.pool_mode === "override" ? "覆盖 " + (st.pool_count || 0) : "默认 " + (st.pool_count || 0)}</b>`,
+    `周期 <b>${intervalLabel(st.interval)}</b>`,
+    `上次同步 <b>${st.last_sync_end ? hhmm(parseStamp(st.last_sync_end)) || st.last_sync_end : "—"}</b>`,
+    `下次 <b>${st.next_due ? hhmm(parseStamp(st.next_due)) || "—" : (running ? "进行中" : "启动后")}</b>`,
+    `分析 <b>${st.analysis_as_of ? hhmm(parseStamp(st.analysis_as_of)) || "—" : "—"}</b>`,
+    st.error_count ? `<span class="err">失败 ${st.error_count}</span>` : `成功 ${st.ok_count || 0}`,
+  ];
+  if (running) bits.unshift("<b>运行中</b>");
+  $("storeStatusStrip").innerHTML = bits.join(" · ");
+  const body = $("storeTableBody");
+  const rows = st.symbols || [];
+  if (!rows.length) {
+    body.innerHTML = `<tr><td colspan="8" class="st-pending">池为空。添加标的或等待默认宇宙同步。</td></tr>`;
+    return;
+  }
+  const srcOpts = (st.source_choices || ["auto", "gate", "crypto", "sina", "naver"]).map(s => {
+    return { v: s, lab: sourceLabel(s) };
+  });
+  body.innerHTML = rows.map(r => {
+    const src = r.source_override && r.source_override !== "auto" ? r.source_override : (r.source || "auto");
+    const opts = srcOpts.map(o => `<option value="${o.v}"${o.v === src ? " selected" : ""}>${o.lab}</option>`).join("");
+    const stCls = r.status === "ok" ? "st-ok" : r.status === "error" ? "st-err" : "st-pending";
+    const stTxt = r.status === "error" ? (r.error || "失败") : (r.status === "ok" ? "正常" : "待同步");
+    const pull = r.last_pull ? (hhmm(parseStamp(r.last_pull)) || "—") : "—";
+    return `<tr data-code="${r.code}">
+      <td class="mono">${r.code}</td>
+      <td>${r.name || r.code}</td>
+      <td>${r.asset_class || "—"}</td>
+      <td><select data-src-code="${r.code}">${opts}</select></td>
+      <td class="num">${r.bars || 0}</td>
+      <td class="mono">${pull}${r.lag_sec != null ? " · " + fmtLag(r.lag_sec) : ""}</td>
+      <td class="${stCls}">${stTxt}</td>
+      <td><button class="del" type="button" data-del="${r.code}" title="从维护池删除">删除</button></td>
+    </tr>`;
+  }).join("");
+}
+async function loadStoreStatus() {
+  try {
+    const st = await jfetch("api/kline_store/status");
+    renderStoreStatus(st);
+  } catch (e) {
+    if ($("storeStatusStrip")) $("storeStatusStrip").textContent = "状态加载失败";
+  }
+}
 function openCoverModal() {
-  const ov = S.override || {};
-  $("coverSymbols").value = (ov.symbols || []).join("\n");
   $("coverErr").textContent = "";
   $("coverModal").hidden = false;
-  setTimeout(() => $("coverSymbols").focus(), 30);
+  loadStoreStatus();
+  setTimeout(() => { const i = $("storeAddInput"); if (i) i.focus(); }, 30);
 }
 function closeCoverModal() {
   $("coverModal").hidden = true;
 }
-async function saveCoverPool() {
-  const text = $("coverSymbols").value;
+async function storePoolPost(body) {
   $("coverErr").textContent = "";
+  const r = await jfetch("api/kline_store/pool", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  if (r.override) S.override = r.override;
+  else if (r.mode) S.override = { symbols: r.symbols || [], count: r.count || 0, mode: r.mode, fingerprint: r.fingerprint };
+  renderStoreStatus(r);
+  renderAll();
+  const nRej = (r.rejected || []).length;
+  if (nRej) {
+    $("coverErr").textContent = (r.rejected || []).map(x => x.code + "：" + x.reason).join("\n");
+  }
+  return r;
+}
+async function addStoreSymbols() {
+  const text = ($("storeAddInput").value || "").trim();
+  if (!text) { toast("请输入代码"); return; }
+  const source = $("storeAddSource").value || "auto";
   try {
-    const r = await jfetch("api/global_pool/override", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ symbols: text })
-    });
-    S.override = r;
-    const nRej = (r.rejected || []).length;
-    if (nRej) {
-      $("coverErr").textContent = (r.rejected || []).map(x => x.code + "：" + x.reason).join("\n");
-    }
-    renderAll();
-    if (r.mode === "override") {
-      toast("覆盖池 " + r.count + " 只" + (nRej ? "（已拒绝无效项）" : "") + "。请强制重扫");
-    } else {
-      toast(nRej ? "有效项为空，已回默认池" : "已恢复默认混合池。请强制重扫");
-    }
-    if (!nRej) closeCoverModal();
-  } catch (e) { toast("覆盖池保存失败"); }
+    const r = await storePoolPost({ action: "add", symbols: text, source });
+    if (!(r.rejected || []).length) $("storeAddInput").value = "";
+    toast("已添加" + ((r.saved && r.saved.length) ? (" " + r.saved.length + " 只") : ""));
+  } catch (e) { toast("添加失败"); }
+}
+async function deleteStoreSymbol(code) {
+  try {
+    await storePoolPost({ action: "delete", symbols: [code] });
+    toast("已删除 " + code);
+  } catch (e) { toast("删除失败"); }
+}
+async function setStoreSource(code, source) {
+  try {
+    await storePoolPost({ action: "update", code, source });
+  } catch (e) { toast("数据源保存失败"); }
 }
 async function clearCoverPool() {
   try {
-    const r = await jfetch("api/global_pool/override", {
+    const r = await storePoolPost({ action: "clear" });
+    S.override = r.override || r;
+    toast("已恢复默认混合池。请立即同步 K 线");
+  } catch (e) { toast("恢复默认失败"); }
+}
+async function startStoreJob(kind, extra) {
+  if (localScanWait) { ensureScanPoll(); return; }
+  localScanWait = true;
+  renderScanProgress(S.status || { scanning: true, scan_progress: { running: true, mode: "crypto", message: "正在请求…" } });
+  ensureScanPoll();
+  const path = kind === "analyze" ? "api/kline_store/analyze" : "api/kline_store/sync";
+  try {
+    const r = await jfetch(path, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "clear" })
+      body: JSON.stringify(extra || {})
     });
-    S.override = r;
-    $("coverSymbols").value = "";
-    $("coverErr").textContent = "";
-    renderAll();
-    closeCoverModal();
-    toast("已清空覆盖，使用默认混合池。请强制重扫");
-  } catch (e) { toast("清空失败"); }
+    if (r.status === "running") {
+      S.status = { scanning: true, scan_progress: r.scan_progress || (S.status && S.status.scan_progress) };
+      toast("已加入当前任务");
+    } else {
+      S.status = { scanning: true, scan_progress: r.scan_progress || { running: true, mode: "crypto" } };
+      scanWasRunning = true;
+      toast(kind === "analyze" ? "已开始分析" : "已开始同步 K 线");
+    }
+    renderScanProgress(S.status);
+    ensureScanPoll();
+  } catch (e) {
+    localScanWait = false;
+    toast("任务启动失败");
+    renderScanProgress(S.status);
+    ensureScanPoll();
+  }
 }
 
 /* =============================== 启动 =============================== */
@@ -1476,8 +1637,6 @@ function boot() {
     S.selBoard = (S.selBoard === board) ? null : board;
     renderAll();
   });
-  $("btnScan").addEventListener("click", () => doScan(false));
-  $("btnForceScan").addEventListener("click", () => doScan(true));
   $("autoCb").addEventListener("change", () => saveCfg());
   document.querySelectorAll("#boxModeTabs .tab").forEach(t => {
     t.addEventListener("click", () => setBoxMode(t.dataset.boxMode));
@@ -1502,8 +1661,37 @@ function boot() {
     if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openCoverModal(); }
   });
   $("btnCoverCancel").addEventListener("click", closeCoverModal);
-  $("btnCoverSave").addEventListener("click", saveCoverPool);
   $("btnCoverClear").addEventListener("click", clearCoverPool);
+  $("btnStoreAdd").addEventListener("click", addStoreSymbols);
+  $("storeAddInput").addEventListener("keydown", e => {
+    if (e.key === "Enter") { e.preventDefault(); addStoreSymbols(); }
+  });
+  $("btnStoreSync").addEventListener("click", () => startStoreJob("sync"));
+  $("btnStoreAnalyze").addEventListener("click", () => startStoreJob("analyze"));
+  $("btnRetryFailed").addEventListener("click", () => startStoreJob("sync", { retry_failed: true }));
+  $("btnAshScan").addEventListener("click", () => doScan(true));
+  $("storeSyncHours").addEventListener("change", async () => {
+    const n = Number($("storeSyncHours").value);
+    try {
+      const r = await jfetch("api/config", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kline_sync_hours: n })
+      });
+      S.cfg = r.config;
+      if ($("cfgSyncHoursLab")) $("cfgSyncHoursLab").textContent = (r.config && r.config.kline_sync_hours) || n;
+      toast("同步间隔已保存");
+    } catch (e) { toast("间隔保存失败"); }
+  });
+  $("storeTableBody").addEventListener("change", e => {
+    const sel = e.target.closest("select[data-src-code]");
+    if (!sel) return;
+    setStoreSource(sel.dataset.srcCode, sel.value);
+  });
+  $("storeTableBody").addEventListener("click", e => {
+    const btn = e.target.closest("[data-del]");
+    if (!btn) return;
+    deleteStoreSymbol(btn.dataset.del);
+  });
   $("coverModal").addEventListener("click", e => {
     if (e.target === $("coverModal")) closeCoverModal();
   });

@@ -1825,10 +1825,12 @@ def crypto_symbol_is_listed(code: str) -> bool:
 def fetch_global_instrument(code: str, interval: str | None = None,
                             lookback: int = CRYPTO_LOOKBACK,
                             hint_source: str | None = None,
-                            hint_class: str | None = None) -> dict | None:
+                            hint_class: str | None = None,
+                            force_source: str | None = None) -> dict | None:
     """
     全市场标的 Tab 任意代码：永续/黄金走币所；
     股票/指数优先 Gate 股票代币（原生 4h/8h/1d），无代币或失败再 Sina 分钟K/日K 或 Naver 日K。
+    force_source=auto/空：默认优先级；gate/crypto/sina/naver 强制该源（配置 UI 覆盖）。
     失败返回 None。
     """
     iv = normalize_crypto_interval(interval or load_crypto_interval())
@@ -1839,8 +1841,20 @@ def fetch_global_instrument(code: str, interval: str | None = None,
     cls = (ident or {}).get("asset_class") or hint_class or ""
     src_hint = (hint_source or (ident or {}).get("source") or "").lower()
     canon = (ident or {}).get("code") or norm_crypto_symbol(code) or code
+    forced = (force_source or "").strip().lower()
+    if forced in ("", "auto"):
+        forced = None
 
-    if cls in ("crypto", "gold") or src_hint == "crypto" or (
+    if forced in ("sina", "naver"):
+        if not ident:
+            return None
+        try:
+            from equity_sources import fetch_equity_instrument
+            return fetch_equity_instrument(ident, interval=iv, lookback=lookback)
+        except Exception:
+            return None
+
+    if cls in ("crypto", "gold") or src_hint == "crypto" or forced == "crypto" or (
             not ident and is_crypto_perp_symbol(code)):
         bars = []
         gold_src = "crypto"
@@ -1934,6 +1948,9 @@ def fetch_global_instrument(code: str, interval: str | None = None,
             if role:
                 out["token_role"] = role
             return out
+
+    if forced == "gate":
+        return None
 
     try:
         from equity_sources import fetch_equity_instrument
