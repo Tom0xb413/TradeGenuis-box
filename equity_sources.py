@@ -27,7 +27,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 import requests
@@ -449,10 +449,10 @@ def fetch_naver_price_daily(naver_code: str, lookback: int = 200) -> list[dict]:
 
 
 def fetch_naver_sise_daily(symbol: str, lookback: int = 200) -> list[dict]:
-    end = datetime.utcnow().strftime("%Y%m%d")
+    end = datetime.now(timezone.utc).strftime("%Y%m%d")
     # ~ lookback 个交易日 ≈ lookback*1.6 自然日，再留余量
     days = max(400, int(lookback) * 2)
-    start = (datetime.utcnow() - timedelta(days=days)).strftime("%Y%m%d")
+    start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y%m%d")
     code, text = http_get(
         _NAVER_SISE,
         params={"symbol": symbol, "requestType": "1", "startTime": start,
